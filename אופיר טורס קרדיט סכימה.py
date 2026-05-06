@@ -4,7 +4,7 @@ import sys
 from datetime import datetime
 import pandas as pd
 from PySide6.QtCore import QCoreApplication, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -69,10 +69,10 @@ def compute_supplier_dashboard_data(
     supplier_cols_dict,
 ):
     supplier_map = {
-        "גלבוע": "ספק גבייה - GILBOA",
-        "אייגנסי": "ספק גבייה - AGENCY",
-        "אודיסאה": "ספק גבייה - ODYSSEY",
-        "בוסטר": "ספק גבייה - BOOSTER",
+        "גלבוע": "ספק גבייה - גילבוע",
+        "אייגנסי": "ספק גבייה - אייג'נסי",
+        "אודיסאה": "ספק גבייה - אודיסאה",
+        "בוסטר": "ספק גבייה - בוסטר",
     }
 
     suppliers = []
@@ -188,12 +188,70 @@ class SupplierBreakdownDialog(QDialog):
         layout.addWidget(table)
 
 
+class VennComparisonWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.left_only = 0
+        self.overlap = 0
+        self.right_only = 0
+        self.setMinimumHeight(180)
+
+    def set_values(self, left_only, overlap, right_only):
+        self.left_only = int(left_only)
+        self.overlap = int(overlap)
+        self.right_only = int(right_only)
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        diameter = min(140, max(90, int(w * 0.28)))
+        radius = diameter // 2
+        center_y = max(58, h // 2 - 10)
+        left_x = w // 2 - int(radius * 1.15)
+        right_x = w // 2 + int(radius * 1.15)
+
+        left_color = QColor("#60a5fa")
+        left_color.setAlpha(130)
+        right_color = QColor("#34d399")
+        right_color.setAlpha(130)
+
+        painter.setPen(QPen(QColor("#2563eb"), 2))
+        painter.setBrush(left_color)
+        painter.drawEllipse(left_x - radius, center_y - radius, diameter, diameter)
+
+        painter.setPen(QPen(QColor("#059669"), 2))
+        painter.setBrush(right_color)
+        painter.drawEllipse(right_x - radius, center_y - radius, diameter, diameter)
+
+        painter.setPen(QPen(QColor("#111827")))
+        painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        painter.drawText(left_x - radius + 10, center_y, f"{self.left_only}")
+        painter.drawText(w // 2 - 12, center_y, f"{self.overlap}")
+        painter.drawText(right_x + radius - 28, center_y, f"{self.right_only}")
+
+        painter.setFont(QFont("Arial", 9))
+        painter.drawText(left_x - radius, center_y + radius + 22, "סולק בלבד")
+        painter.drawText(w // 2 - 26, center_y + radius + 22, "חיתוך")
+        painter.drawText(right_x + radius - 66, center_y + radius + 22, "ספק בלבד")
+
+        painter.end()
+
+
 class SupplierExceptionsDialog(QDialog):
     def __init__(self, supplier_stats, parent=None):
         super().__init__(parent)
+        self.supplier_stats = supplier_stats
         self.setWindowTitle(f"חריגים - {supplier_stats['supplier_name']}")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.resize(1200, 760)
+        self.credit_records = supplier_stats.get("credit_exception_records", [])
+        self.supplier_records = supplier_stats.get("supplier_exception_records", [])
+        self.credit_table = None
+        self.supplier_table = None
 
         main_layout = QVBoxLayout(self)
         title = make_rtl_label(f"חריגים מתוך הנתונים האמיתיים - {supplier_stats['supplier_name']}", bold=True)
@@ -205,30 +263,82 @@ class SupplierExceptionsDialog(QDialog):
         )
         main_layout.addWidget(summary)
 
+        export_button = QPushButton("ייצוא חריגים לאקסל")
+        export_button.setMinimumHeight(38)
+        export_button.clicked.connect(self._export_exceptions_to_excel)
+        main_layout.addWidget(export_button, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+
         tabs = QTabWidget()
         tabs.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
         credit_tab = QWidget()
         credit_layout = QVBoxLayout(credit_tab)
-        credit_layout.addWidget(
-            self._build_records_table(
-                supplier_stats.get("credit_exception_records", []),
-                empty_message="אין חריגים בצד הקרדיט לספק זה.",
-            )
+        self.credit_table = self._build_records_table(
+            self.credit_records,
+            empty_message="אין חריגים בצד הקרדיט לספק זה.",
         )
+        credit_layout.addWidget(self.credit_table)
 
         supplier_tab = QWidget()
         supplier_layout = QVBoxLayout(supplier_tab)
-        supplier_layout.addWidget(
-            self._build_records_table(
-                supplier_stats.get("supplier_exception_records", []),
-                empty_message="אין חריגים בצד הספק לספק זה.",
-            )
+        self.supplier_table = self._build_records_table(
+            self.supplier_records,
+            empty_message="אין חריגים בצד הספק לספק זה.",
         )
+        supplier_layout.addWidget(self.supplier_table)
 
         tabs.addTab(credit_tab, "חריגים - רק בקרדיט")
         tabs.addTab(supplier_tab, "חריגים - רק בספק")
         main_layout.addWidget(tabs)
+
+        drilldown_box = QFrame()
+        drilldown_box.setStyleSheet(
+            "QFrame { background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; }"
+        )
+        drilldown_layout = QVBoxLayout(drilldown_box)
+
+        drilldown_title = make_rtl_label("התאמה כמותית וכספית בלחיצה על רשומה", bold=True)
+        drilldown_layout.addWidget(drilldown_title)
+
+        self.selected_record_label = make_rtl_label("בחר רשומה בטבלה כדי לראות התאמה כמותית וכספית")
+        drilldown_layout.addWidget(self.selected_record_label)
+
+        quantitative_row = QHBoxLayout()
+        self.processor_count_label = make_rtl_label("כמות בצד סולק: 0")
+        self.overlap_count_label = make_rtl_label("כמות משותפת: 0")
+        self.supplier_count_label = make_rtl_label("כמות בצד ספק: 0")
+        quantitative_row.addWidget(self.processor_count_label)
+        quantitative_row.addWidget(self.overlap_count_label)
+        quantitative_row.addWidget(self.supplier_count_label)
+        drilldown_layout.addLayout(quantitative_row)
+
+        monetary_row = QHBoxLayout()
+        self.processor_amount_label = make_rtl_label("סכום סולק: ₪0")
+        self.overlap_amount_label = make_rtl_label("סכום משותף: ₪0")
+        self.supplier_amount_label = make_rtl_label("סכום ספק: ₪0")
+        self.diff_amount_label = make_rtl_label("פער: ₪0")
+        monetary_row.addWidget(self.processor_amount_label)
+        monetary_row.addWidget(self.overlap_amount_label)
+        monetary_row.addWidget(self.supplier_amount_label)
+        monetary_row.addWidget(self.diff_amount_label)
+        drilldown_layout.addLayout(monetary_row)
+
+        self.venn_widget = VennComparisonWidget()
+        drilldown_layout.addWidget(self.venn_widget)
+
+        venn_amounts = QHBoxLayout()
+        self.left_only_amount_label = make_rtl_label("סולק בלבד: ₪0")
+        self.intersection_amount_label = make_rtl_label("חיתוך: ₪0")
+        self.right_only_amount_label = make_rtl_label("ספק בלבד: ₪0")
+        venn_amounts.addWidget(self.left_only_amount_label)
+        venn_amounts.addWidget(self.intersection_amount_label)
+        venn_amounts.addWidget(self.right_only_amount_label)
+        drilldown_layout.addLayout(venn_amounts)
+
+        main_layout.addWidget(drilldown_box)
+
+        self._wire_selection_handlers()
+        self._update_drilldown(None, "")
 
     def _build_records_table(self, records, empty_message):
         if not records:
@@ -241,6 +351,7 @@ class SupplierExceptionsDialog(QDialog):
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         table.setFont(QFont("Arial", 10))
@@ -250,6 +361,135 @@ class SupplierExceptionsDialog(QDialog):
                 table.setItem(row_idx, col_idx, QTableWidgetItem(str(row.get(header, ""))))
 
         return table
+
+    def _wire_selection_handlers(self):
+        if isinstance(self.credit_table, QTableWidget):
+            self.credit_table.itemSelectionChanged.connect(
+                lambda: self._handle_table_selection(
+                    self.credit_table,
+                    self.credit_records,
+                    "חריג סולק",
+                )
+            )
+
+        if isinstance(self.supplier_table, QTableWidget):
+            self.supplier_table.itemSelectionChanged.connect(
+                lambda: self._handle_table_selection(
+                    self.supplier_table,
+                    self.supplier_records,
+                    "חריג ספק",
+                )
+            )
+
+    def _handle_table_selection(self, table, records, source_label):
+        if not isinstance(table, QTableWidget):
+            return
+
+        row = table.currentRow()
+        if row < 0 or row >= len(records):
+            self._update_drilldown(None, "")
+            return
+
+        self._update_drilldown(records[row], source_label)
+
+    def _record_display_text(self, record, source_label):
+        if not record:
+            return "בחר רשומה בטבלה כדי לראות התאמה כמותית וכספית"
+
+        identifier = (
+            record.get("מספר הזמנה")
+            or record.get("Voucher number")
+            or record.get("Doc number")
+            or record.get("טוקן")
+            or record.get("Pan")
+            or "ללא מזהה"
+        )
+        amount = self._extract_amount(record)
+        return f"נבחרה רשומה ({source_label}) | מזהה: {identifier} | סכום רשומה: {format_currency(amount)}"
+
+    def _extract_amount(self, record):
+        amount_candidates = [
+            "סכום",
+            "match_amount",
+            "origin amount",
+            "charge amount",
+            "Amount",
+            "Invoice sum",
+        ]
+        for key in amount_candidates:
+            if key in record and str(record.get(key, "")).strip() != "":
+                return clean_amount(record.get(key))
+        return 0.0
+
+    def _update_drilldown(self, selected_record, source_label):
+        matched_count = int(self.supplier_stats.get("matched_count", 0))
+        credit_only_count = int(self.supplier_stats.get("credit_only_count", 0))
+        supplier_only_count = int(self.supplier_stats.get("supplier_only_count", 0))
+
+        processor_count = matched_count + credit_only_count
+        supplier_count = matched_count + supplier_only_count
+
+        matched_amount = float(self.supplier_stats.get("matched_amount", 0.0))
+        credit_only_amount = float(self.supplier_stats.get("credit_only_amount", 0.0))
+        supplier_only_amount = float(self.supplier_stats.get("supplier_only_amount", 0.0))
+
+        processor_total = float(self.supplier_stats.get("processor_total", matched_amount + credit_only_amount))
+        supplier_total = float(self.supplier_stats.get("supplier_total", matched_amount + supplier_only_amount))
+        diff_amount = float(self.supplier_stats.get("diff_amount", supplier_total - processor_total))
+
+        self.selected_record_label.setText(self._record_display_text(selected_record, source_label))
+
+        self.processor_count_label.setText(f"כמות בצד סולק: {processor_count}")
+        self.overlap_count_label.setText(f"כמות משותפת: {matched_count}")
+        self.supplier_count_label.setText(f"כמות בצד ספק: {supplier_count}")
+
+        self.processor_amount_label.setText(f"סכום סולק: {format_currency(processor_total)}")
+        self.overlap_amount_label.setText(f"סכום משותף: {format_currency(matched_amount)}")
+        self.supplier_amount_label.setText(f"סכום ספק: {format_currency(supplier_total)}")
+        self.diff_amount_label.setText(f"פער: {format_currency(diff_amount)}")
+
+        self.left_only_amount_label.setText(f"סולק בלבד: {format_currency(credit_only_amount)}")
+        self.intersection_amount_label.setText(f"חיתוך: {format_currency(matched_amount)}")
+        self.right_only_amount_label.setText(f"ספק בלבד: {format_currency(supplier_only_amount)}")
+
+        self.venn_widget.set_values(credit_only_count, matched_count, supplier_only_count)
+
+    def _export_exceptions_to_excel(self):
+        default_name = f"חריגים_{self.supplier_stats['supplier_key']}.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "שמור חריגים לקובץ אקסל",
+            default_name,
+            "Excel Files (*.xlsx)",
+        )
+        if not path:
+            return
+
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+
+        try:
+            credit_df = pd.DataFrame(self.supplier_stats.get("credit_exception_records", []))
+            supplier_df = pd.DataFrame(self.supplier_stats.get("supplier_exception_records", []))
+
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                if credit_df.empty:
+                    pd.DataFrame({"הודעה": ["אין חריגים בצד הקרדיט"]}).to_excel(
+                        writer, sheet_name="חריגים_קרדיט", index=False
+                    )
+                else:
+                    credit_df.to_excel(writer, sheet_name="חריגים_קרדיט", index=False)
+
+                if supplier_df.empty:
+                    pd.DataFrame({"הודעה": ["אין חריגים בצד הספק"]}).to_excel(
+                        writer, sheet_name="חריגים_ספק", index=False
+                    )
+                else:
+                    supplier_df.to_excel(writer, sheet_name="חריגים_ספק", index=False)
+
+            QMessageBox.information(self, "הצלחה", f"קובץ החריגים נשמר בהצלחה:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "שגיאה", f"ייצוא החריגים נכשל:\n{exc}")
 
 
 class SupplierReconciliationDashboard(QWidget):
@@ -273,10 +513,10 @@ class SupplierReconciliationDashboard(QWidget):
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         title = QLabel(title_text)
         title.setStyleSheet("color: #6b7280; font-size: 12px;")
-        title.setAlignment(ALIGN_RTL)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         value = QLabel(value_text)
         value.setStyleSheet("color: #111827; font-size: 22px; font-weight: 700;")
-        value.setAlignment(ALIGN_RTL)
+        value.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
         card_layout.addWidget(value)
         return card
@@ -837,10 +1077,10 @@ class ReconciliationWindow(QWidget):
 
         self.output_edit = self._add_row(grid, 0, "תיקיית פלט", self._browse_output_folder, is_folder=True)
         self.credit_edit = self._add_row(grid, 1, "קובץ סולק קרדיט 2000", self._browse_credit_file)
-        self.gilboa_edit = self._add_row(grid, 2, "ספק גבייה - GILBOA", self._browse_gilboa_file)
-        self.agency_edit = self._add_row(grid, 3, "ספק גבייה - AGENCY", self._browse_agency_file)
-        self.odyssey_edit = self._add_row(grid, 4, "ספק גבייה - ODYSSEY", self._browse_odyssey_file)
-        self.booster_edit = self._add_row(grid, 5, "ספק גבייה - BOOSTER", self._browse_booster_file)
+        self.gilboa_edit = self._add_row(grid, 2, "ספק גבייה - גילבוע", self._browse_gilboa_file)
+        self.agency_edit = self._add_row(grid, 3, "ספק גבייה - אייג'נסי", self._browse_agency_file)
+        self.odyssey_edit = self._add_row(grid, 4, "ספק גבייה - אודיסאה", self._browse_odyssey_file)
+        self.booster_edit = self._add_row(grid, 5, "ספק גבייה - בוסטר", self._browse_booster_file)
 
         main_layout.addLayout(grid)
 
