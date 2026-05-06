@@ -1,28 +1,345 @@
 import os
 import re
-from tkinter import Tk, filedialog
+import sys
+from datetime import datetime
 import pandas as pd
+from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 
-def get_file_path(title_message):
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    file_selected = filedialog.askopenfilename(
-        title=title_message,
-        filetypes=[("Excel or TXT Files", "*.xlsx;*.xls;*.txt;*.csv"), ("All Files", "*.*")],
-    )
-    root.destroy()
-    return file_selected
+ALIGN_RTL = (
+    Qt.AlignmentFlag.AlignRight
+    | Qt.AlignmentFlag.AlignAbsolute
+    | Qt.AlignmentFlag.AlignVCenter
+)
 
 
-def get_folder_path(title_message):
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    folder_selected = filedialog.askdirectory(title=title_message)
-    root.destroy()
-    return folder_selected
+def make_rtl_label(text, bold=False):
+    label = QLabel(text)
+    font = QFont("Arial", 11)
+    font.setBold(bold)
+    label.setFont(font)
+    label.setAlignment(ALIGN_RTL)
+    label.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    return label
+
+
+def format_currency(value):
+    return f"₪{value:,.0f}"
+
+
+def sum_amount(series):
+    return float(pd.to_numeric(series, errors="coerce").fillna(0).sum())
+
+
+def classify_diff_status(diff_value):
+    if diff_value == 0:
+        return "success", "✅"
+    if diff_value < 0:
+        return "warning", "⚠️"
+    return "error", "❌"
+
+
+def compute_supplier_dashboard_data(
+    df_credit,
+    df_all_suppliers,
+    matched_all,
+    df_only_in_credit,
+    df_only_in_suppliers,
+    supplier_cols_dict,
+):
+    supplier_map = {
+        "גלבוע": "ספק גבייה - GILBOA",
+        "אייגנסי": "ספק גבייה - AGENCY",
+        "אודיסאה": "ספק גבייה - ODYSSEY",
+        "בוסטר": "ספק גבייה - BOOSTER",
+    }
+
+    suppliers = []
+    total_processor = 0.0
+    total_supplier = 0.0
+    total_matched_amount = 0.0
+
+    for supplier_key, supplier_label in supplier_map.items():
+        matched_supplier = matched_all[matched_all["ספק_משויך"] == supplier_key]
+        credit_only_supplier = df_only_in_credit[df_only_in_credit["ספק_משויך"] == supplier_key]
+        supplier_only_rows = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == supplier_key]
+
+        credit_exception_cols = [
+            c for c in ["מסוף", "טוקן", "מספר אישור", "סכום", "מספר הזמנה"]
+            if c in credit_only_supplier.columns
+        ]
+        supplier_exception_cols = [
+            c for c in supplier_cols_dict.get(supplier_key, [])
+            if c in supplier_only_rows.columns
+        ]
+
+        matched_amount = sum_amount(matched_supplier.get("match_amount", pd.Series(dtype=float)))
+        credit_only_amount = sum_amount(credit_only_supplier.get("match_amount", pd.Series(dtype=float)))
+        supplier_only_amount = sum_amount(supplier_only_rows.get("match_amount", pd.Series(dtype=float)))
+
+        processor_total = matched_amount + credit_only_amount
+        supplier_total = matched_amount + supplier_only_amount
+        diff_amount = supplier_total - processor_total
+        status, status_icon = classify_diff_status(diff_amount)
+
+        matched_count = int(len(matched_supplier))
+        credit_only_count = int(len(credit_only_supplier))
+        supplier_only_count = int(len(supplier_only_rows))
+
+        denominator = matched_count + credit_only_count
+        match_rate = (matched_count / denominator * 100) if denominator else 0.0
+
+        suppliers.append(
+            {
+                "supplier_key": supplier_key,
+                "supplier_name": supplier_label,
+                "processor_total": processor_total,
+                "supplier_total": supplier_total,
+                "diff_amount": diff_amount,
+                "status": status,
+                "status_icon": status_icon,
+                "matched_count": matched_count,
+                "credit_only_count": credit_only_count,
+                "supplier_only_count": supplier_only_count,
+                "match_rate": match_rate,
+                "matched_amount": matched_amount,
+                "credit_only_amount": credit_only_amount,
+                "supplier_only_amount": supplier_only_amount,
+                "credit_exception_records": (
+                    credit_only_supplier[credit_exception_cols].fillna("").to_dict("records")
+                    if credit_exception_cols
+                    else []
+                ),
+                "supplier_exception_records": (
+                    supplier_only_rows[supplier_exception_cols].fillna("").to_dict("records")
+                    if supplier_exception_cols
+                    else []
+                ),
+            }
+        )
+
+        total_processor += processor_total
+        total_supplier += supplier_total
+        total_matched_amount += matched_amount
+
+    discrepancy = total_supplier - total_processor
+    overall_rate = (total_matched_amount / total_processor * 100) if total_processor else 0.0
+
+    return {
+        "kpis": {
+            "processor_total": total_processor,
+            "suppliers_total": total_supplier,
+            "match_rate": overall_rate,
+            "discrepancy": discrepancy,
+        },
+        "suppliers": suppliers,
+    }
+
+
+class SupplierBreakdownDialog(QDialog):
+    def __init__(self, supplier_stats, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"פירוט תנועות - {supplier_stats['supplier_name']}")
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(560, 280)
+
+        layout = QVBoxLayout(self)
+        title = make_rtl_label(f"פירוט תנועות עבור {supplier_stats['supplier_name']}", bold=True)
+        layout.addWidget(title)
+
+        table = QTableWidget(3, 3)
+        table.setHorizontalHeaderLabels(["קטגוריה", "כמות", "סכום"]) 
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        rows = [
+            ("התאמות", supplier_stats["matched_count"], supplier_stats["matched_amount"]),
+            ("רק בקרדיט", supplier_stats["credit_only_count"], supplier_stats["credit_only_amount"]),
+            ("רק בספק", supplier_stats["supplier_only_count"], supplier_stats["supplier_only_amount"]),
+        ]
+        for row_idx, (name, count, amount) in enumerate(rows):
+            table.setItem(row_idx, 0, QTableWidgetItem(name))
+            table.setItem(row_idx, 1, QTableWidgetItem(str(count)))
+            table.setItem(row_idx, 2, QTableWidgetItem(format_currency(amount)))
+
+        layout.addWidget(table)
+
+
+class SupplierExceptionsDialog(QDialog):
+    def __init__(self, supplier_stats, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"חריגים - {supplier_stats['supplier_name']}")
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(1200, 760)
+
+        main_layout = QVBoxLayout(self)
+        title = make_rtl_label(f"חריגים מתוך הנתונים האמיתיים - {supplier_stats['supplier_name']}", bold=True)
+        title.setFont(QFont("Arial", 13, QFont.Weight.Bold))
+        main_layout.addWidget(title)
+
+        summary = make_rtl_label(
+            f"רק בקרדיט: {supplier_stats['credit_only_count']} | רק בספק: {supplier_stats['supplier_only_count']}"
+        )
+        main_layout.addWidget(summary)
+
+        tabs = QTabWidget()
+        tabs.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
+        credit_tab = QWidget()
+        credit_layout = QVBoxLayout(credit_tab)
+        credit_layout.addWidget(
+            self._build_records_table(
+                supplier_stats.get("credit_exception_records", []),
+                empty_message="אין חריגים בצד הקרדיט לספק זה.",
+            )
+        )
+
+        supplier_tab = QWidget()
+        supplier_layout = QVBoxLayout(supplier_tab)
+        supplier_layout.addWidget(
+            self._build_records_table(
+                supplier_stats.get("supplier_exception_records", []),
+                empty_message="אין חריגים בצד הספק לספק זה.",
+            )
+        )
+
+        tabs.addTab(credit_tab, "חריגים - רק בקרדיט")
+        tabs.addTab(supplier_tab, "חריגים - רק בספק")
+        main_layout.addWidget(tabs)
+
+    def _build_records_table(self, records, empty_message):
+        if not records:
+            return make_rtl_label(empty_message)
+
+        headers = list(records[0].keys())
+        table = QTableWidget(len(records), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setFont(QFont("Arial", 10))
+
+        for row_idx, row in enumerate(records):
+            for col_idx, header in enumerate(headers):
+                table.setItem(row_idx, col_idx, QTableWidgetItem(str(row.get(header, ""))))
+
+        return table
+
+
+class SupplierReconciliationDashboard(QWidget):
+    def __init__(self, dashboard_data, parent=None):
+        super().__init__(parent)
+        self.dashboard_data = dashboard_data
+        self._details_dialogs = []
+        self.setWindowTitle("פירוט התאמה לפי ספק")
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.setMinimumSize(1200, 720)
+        self.resize(1440, 860)
+        self._build_ui()
+
+    def _make_kpi_card(self, title_text, value_text, accent_color):
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background-color: #ffffff; border: 1px solid #e5e7eb; border-right: 5px solid {accent_color}; border-radius: 10px; }}"
+        )
+        card_layout = QVBoxLayout(card)
+        card.setMinimumHeight(100)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        title = QLabel(title_text)
+        title.setStyleSheet("color: #6b7280; font-size: 12px;")
+        title.setAlignment(ALIGN_RTL)
+        value = QLabel(value_text)
+        value.setStyleSheet("color: #111827; font-size: 22px; font-weight: 700;")
+        value.setAlignment(ALIGN_RTL)
+        card_layout.addWidget(title)
+        card_layout.addWidget(value)
+        return card
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        header = make_rtl_label("פירוט התאמה לפי ספק", bold=True)
+        header.setFont(QFont("Arial", 17, QFont.Weight.Bold))
+        layout.addWidget(header, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+
+        kpis = self.dashboard_data["kpis"]
+        cards_layout = QHBoxLayout()
+        cards_layout.addWidget(self._make_kpi_card("סכום סולק", format_currency(kpis["processor_total"]), "#2563eb"))
+        cards_layout.addWidget(self._make_kpi_card("סכום ספקים", format_currency(kpis["suppliers_total"]), "#7c3aed"))
+        cards_layout.addWidget(self._make_kpi_card("אחוז התאמה", f"{kpis['match_rate']:.1f}%", "#16a34a"))
+
+        discrepancy_color = "#16a34a" if kpis["discrepancy"] == 0 else "#dc2626"
+        cards_layout.addWidget(self._make_kpi_card("הפרש לטיפול", format_currency(kpis["discrepancy"]), discrepancy_color))
+        layout.addLayout(cards_layout)
+
+        table = QTableWidget(len(self.dashboard_data["suppliers"]), 6)
+        table.setHorizontalHeaderLabels(["שם הספק", "דיווח סולק", "דיווח ספק", "הפרש", "סטטוס", "פעולה"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setFont(QFont("Arial", 11))
+        table.setMinimumHeight(460)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setMinimumSectionSize(120)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        for row_idx, supplier_stats in enumerate(self.dashboard_data["suppliers"]):
+            table.setItem(row_idx, 0, QTableWidgetItem(supplier_stats["supplier_name"]))
+            table.setItem(row_idx, 1, QTableWidgetItem(format_currency(supplier_stats["processor_total"])))
+            table.setItem(row_idx, 2, QTableWidgetItem(format_currency(supplier_stats["supplier_total"])))
+
+            diff_item = QTableWidgetItem(format_currency(supplier_stats["diff_amount"]))
+            if supplier_stats["status"] == "success":
+                diff_item.setForeground(Qt.GlobalColor.darkGreen)
+            elif supplier_stats["status"] == "warning":
+                diff_item.setForeground(Qt.GlobalColor.darkYellow)
+            else:
+                diff_item.setForeground(Qt.GlobalColor.red)
+            table.setItem(row_idx, 3, diff_item)
+
+            status_text = f"{supplier_stats['status_icon']} {supplier_stats['matched_count']} התאמות"
+            table.setItem(row_idx, 4, QTableWidgetItem(status_text))
+
+            action_btn = QPushButton("הצג חריגים")
+            action_btn.clicked.connect(
+                lambda _checked=False, data=supplier_stats: self._show_supplier_details(data)
+            )
+            table.setCellWidget(row_idx, 5, action_btn)
+
+        layout.addWidget(table)
+
+    def _show_supplier_details(self, supplier_stats):
+        dialog = SupplierExceptionsDialog(supplier_stats, self)
+        self._details_dialogs.append(dialog)
+        dialog.exec()
 
 
 def clean_card(card_val):
@@ -109,9 +426,9 @@ def load_agency(file_path):
 
     header_idx = 0
     for i, row in temp_df.iterrows():
-        row_str = row.astype(str).fillna("").values
+        row_str = [str(s) for s in row.fillna("").values]
         if any("4 ספרות" in s or "סכום מטבע ראשי" in s or "מס' תיק" in s for s in row_str):
-            header_idx = i
+            header_idx = int(str(i).split(".")[0])
             break
 
     if file_path.lower().endswith(".csv"):
@@ -127,10 +444,14 @@ def load_agency(file_path):
 
     df.columns = df.columns.astype(str).str.strip()
 
+    column_names = [str(c) for c in list(df.columns)]
     required_cols = ["4 ספרות אחרונות", "סכום מטבע ראשי", "מס' תיק", "מספר אישור"]
     for col in required_cols:
-        if col not in df.columns:
-            matched_col = [c for c in df.columns if col in c or c in col]
+        if col not in column_names:
+            matched_col = [
+                c for c in column_names
+                if col in c or c in col
+            ]
             if matched_col:
                 df.rename(columns={matched_col[0]: col}, inplace=True)
 
@@ -155,9 +476,9 @@ def load_odyssey(file_path):
 
     header_idx = 0
     for i, row in temp_df.iterrows():
-        row_str = row.astype(str).values
+        row_str = [str(s) for s in row.values]
         if any("Amount" in s for s in row_str) and any("Card" in s for s in row_str):
-            header_idx = i
+            header_idx = int(str(i).split(".")[0])
             break
 
     if file_path.lower().endswith(".csv"):
@@ -273,48 +594,79 @@ def load_credit_2000(file_path):
 # תהליך ההתאמה הראשי
 # =====================================================================
 
-def run_reconciliation():
-    credit_file = get_file_path("בחר את קובץ קרדיט 2000")
-    if not credit_file: return
+def run_reconciliation(
+    credit_file,
+    output_folder,
+    gilboa_file="",
+    agency_file="",
+    odyssey_file="",
+    booster_file="",
+    log_func=None,
+):
+    def log(message):
+        if log_func:
+            log_func(message)
 
-    input_folder = get_folder_path("בחר את תיקיית הספקים")
-    if not input_folder: return
+    log("התחלת ריצה: טעינת פרמטרים...")
 
-    output_folder = get_folder_path("בחר תיקיית פלט לשמירת דוחות ההתאמה")
-    if not output_folder: return
+    if not credit_file:
+        raise ValueError("יש לבחור קובץ קרדיט 2000.")
 
-    files_in_input = os.listdir(input_folder)
+    if not output_folder:
+        raise ValueError("יש לבחור תיקיית פלט.")
 
-    gilboa_file = None
-    agency_file = None
-    odyssey_file = None
-    booster_file = None
+    if not os.path.isfile(credit_file):
+        raise FileNotFoundError(f"קובץ קרדיט 2000 לא נמצא: {credit_file}")
 
-    for f in files_in_input:
-        if f.startswith("~$"): continue
-        f_lower = f.lower()
-        f_path = os.path.join(input_folder, f)
+    allowed_ext = {".xlsx", ".xls", ".csv", ".txt"}
+    credit_ext = os.path.splitext(credit_file)[1].lower()
+    if credit_ext not in allowed_ext:
+        raise ValueError(f"סוג קובץ לא נתמך לקרדיט 2000: {credit_ext}")
 
-        if "גלבוע" in f or "gilboa" in f_lower:
-            gilboa_file = f_path
-        elif "אייגנסי" in f or "agency" in f_lower:
-            agency_file = f_path
-        elif "אודיסאה" in f or "odyssey" in f_lower or "קבלות אודיסאה" in f_lower:
-            odyssey_file = f_path
-        elif "בוסטר" in f or "booster" in f_lower:
-            booster_file = f_path
+    supplier_files = {
+        "גלבוע": gilboa_file,
+        "אייגנסי": agency_file,
+        "אודיסאה": odyssey_file,
+        "בוסטר": booster_file,
+    }
 
+    if not any(path for path in supplier_files.values()):
+        raise ValueError("יש לבחור לפחות קובץ ספק אחד.")
+
+    for supplier_name, file_path in supplier_files.items():
+        if file_path and not os.path.isfile(file_path):
+            raise FileNotFoundError(f"קובץ הספק לא נמצא ({supplier_name}): {file_path}")
+        if file_path:
+            supplier_ext = os.path.splitext(file_path)[1].lower()
+            if supplier_ext not in allowed_ext:
+                raise ValueError(f"סוג קובץ לא נתמך עבור {supplier_name}: {supplier_ext}")
+
+    os.makedirs(output_folder, exist_ok=True)
+    log("תיקיית הפלט מוכנה.")
+
+    log("טוען קובץ קרדיט 2000...")
     df_credit = load_credit_2000(credit_file)
+    log(f"נטענו {len(df_credit)} רשומות מקרדיט 2000.")
 
     suppliers_dfs = []
-    if gilboa_file: suppliers_dfs.append(load_gilboa(gilboa_file))
-    if agency_file: suppliers_dfs.append(load_agency(agency_file))
-    if odyssey_file: suppliers_dfs.append(load_odyssey(odyssey_file))
-    if booster_file: suppliers_dfs.append(load_booster(booster_file))
+    if gilboa_file:
+        log("טוען קובץ ספק: גלבוע...")
+        suppliers_dfs.append(load_gilboa(gilboa_file))
+    if agency_file:
+        log("טוען קובץ ספק: אייגנסי...")
+        suppliers_dfs.append(load_agency(agency_file))
+    if odyssey_file:
+        log("טוען קובץ ספק: אודיסאה...")
+        suppliers_dfs.append(load_odyssey(odyssey_file))
+    if booster_file:
+        log("טוען קובץ ספק: בוסטר...")
+        suppliers_dfs.append(load_booster(booster_file))
 
-    if not suppliers_dfs: return
+    if not suppliers_dfs:
+        raise ValueError("לא נבחרו קבצי ספקים תקינים לעיבוד.")
 
     df_all_suppliers = pd.concat(suppliers_dfs, ignore_index=True)
+    log(f"נטענו {len(df_all_suppliers)} רשומות מכלל הספקים.")
 
     df_credit["credit_uid"] = range(len(df_credit))
     df_all_suppliers["supplier_uid"] = range(len(df_all_suppliers))
@@ -348,12 +700,14 @@ def run_reconciliation():
 
     matched_all = pd.concat([matched_gilboa, matched_with_auth, matched_odyssey], ignore_index=True)
     matched_all = matched_all.drop_duplicates(subset=["credit_uid", "supplier_uid"])
+    log(f"הושלמו התאמות: {len(matched_all)}.")
 
     matched_credit_uids = matched_all["credit_uid"].unique()
     df_only_in_credit = df_credit[~df_credit["credit_uid"].isin(matched_credit_uids)]
 
     matched_supplier_uids = matched_all["supplier_uid"].unique()
     df_only_in_suppliers = df_all_suppliers[~df_all_suppliers["supplier_uid"].isin(matched_supplier_uids)]
+    log(f"רק בקרדיט: {len(df_only_in_credit)} | רק בספקים: {len(df_only_in_suppliers)}")
 
     # =====================================================================
     # יצירת דוחות ספציפיים לפי עמודות מבוקשות
@@ -375,6 +729,7 @@ def run_reconciliation():
     path_matched = os.path.join(output_folder, "1_התאמה_מלאה.xlsx")
     path_credit = os.path.join(output_folder, "2_רק_בקרדיט_2000.xlsx")
     path_suppliers = os.path.join(output_folder, "3_רק_בדוחות_הספקים.xlsx")
+    path_log = os.path.join(output_folder, "LOGER.log")
 
     # --- יצירת קובץ 1: התאמה מלאה ---
     with pd.ExcelWriter(path_matched, engine="openpyxl") as writer:
@@ -429,8 +784,253 @@ def run_reconciliation():
         if not has_sheets_sup:
             pd.DataFrame(columns=["אין נתונים"]).to_excel(writer, sheet_name="אין נתונים", index=False)
 
-    print(f"\nהדוחות נוצרו בהצלחה בתיקייה: {output_folder}")
+    dashboard_data = compute_supplier_dashboard_data(
+        df_credit=df_credit,
+        df_all_suppliers=df_all_suppliers,
+        matched_all=matched_all,
+        df_only_in_credit=df_only_in_credit,
+        df_only_in_suppliers=df_only_in_suppliers,
+        supplier_cols_dict=supplier_cols_dict,
+    )
+
+    log("כתיבת קבצי הפלט הושלמה בהצלחה.")
+
+    return {
+        "matched": path_matched,
+        "credit_only": path_credit,
+        "suppliers_only": path_suppliers,
+        "output_folder": output_folder,
+        "log_file": path_log,
+        "dashboard_data": dashboard_data,
+    }
+
+
+class ReconciliationWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("כלי התאמות קרדיט 2000")
+        self.setMinimumSize(1200, 760)
+        self.resize(1440, 900)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._active_log_path = None
+        self._dashboard_window = None
+        self._build_ui()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(14)
+
+        title = make_rtl_label("התאמת קרדיט 2000 מול ספקי גבייה", bold=True)
+        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        main_layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+
+        subtitle = make_rtl_label("בחר תיקיית פלט, קובץ קרדיט 2000, וקבצי ספקים (אופציונלי לבחור חלק מהם).")
+        subtitle.setStyleSheet("color: #444;")
+        main_layout.addWidget(subtitle, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 2)
+        grid.setColumnStretch(1, 5)
+        grid.setColumnStretch(2, 1)
+
+        self.output_edit = self._add_row(grid, 0, "תיקיית פלט", self._browse_output_folder, is_folder=True)
+        self.credit_edit = self._add_row(grid, 1, "קובץ סולק קרדיט 2000", self._browse_credit_file)
+        self.gilboa_edit = self._add_row(grid, 2, "ספק גבייה - GILBOA", self._browse_gilboa_file)
+        self.agency_edit = self._add_row(grid, 3, "ספק גבייה - AGENCY", self._browse_agency_file)
+        self.odyssey_edit = self._add_row(grid, 4, "ספק גבייה - ODYSSEY", self._browse_odyssey_file)
+        self.booster_edit = self._add_row(grid, 5, "ספק גבייה - BOOSTER", self._browse_booster_file)
+
+        main_layout.addLayout(grid)
+
+        self.status_label = make_rtl_label("מצב: מוכן")
+        self.status_label.setStyleSheet("color: #666;")
+        main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.log_view.setFont(QFont("Consolas", 10))
+        self.log_view.setMinimumHeight(260)
+        self.log_view.setStyleSheet(
+            "QTextEdit { background-color: #000000; color: #d8ffd8; border: 1px solid #333; }"
+        )
+        main_layout.addWidget(make_rtl_label("לוג פעילות:"), alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+        main_layout.addWidget(self.log_view)
+
+        self.run_button = QPushButton("הפעל התאמה")
+        self.run_button.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.run_button.clicked.connect(self._on_run_clicked)
+        self.run_button.setMinimumHeight(46)
+        main_layout.addWidget(self.run_button)
+
+        self.setLayout(main_layout)
+
+    def _add_row(self, grid, row_idx, label_text, browse_handler, is_folder=False):
+        label = make_rtl_label(label_text)
+        browse_button = QPushButton("בחירה")
+        browse_button.setMinimumWidth(130)
+        browse_button.setMinimumHeight(34)
+        browse_button.clicked.connect(browse_handler)
+
+        line_edit = QLineEdit()
+        line_edit.setReadOnly(True)
+        line_edit.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        line_edit.setAlignment(ALIGN_RTL)
+        line_edit.setFont(QFont("Arial", 10))
+        line_edit.setMinimumHeight(34)
+        line_edit.setPlaceholderText("לא נבחר" if not is_folder else "לא נבחרה תיקייה")
+
+        grid.addWidget(label, row_idx, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+        grid.addWidget(line_edit, row_idx, 1)
+        grid.addWidget(browse_button, row_idx, 2)
+        return line_edit
+
+    def _browse_file(self, target_edit, title):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            title,
+            "",
+            "Excel or Text Files (*.xlsx *.xls *.csv *.txt);;All Files (*)",
+        )
+        if file_path:
+            target_edit.setText(file_path)
+
+    def _browse_folder(self, target_edit, title):
+        folder_path = QFileDialog.getExistingDirectory(self, title)
+        if folder_path:
+            target_edit.setText(folder_path)
+
+    def _browse_output_folder(self):
+        self._browse_folder(self.output_edit, "בחר תיקיית פלט")
+
+    def _browse_credit_file(self):
+        self._browse_file(self.credit_edit, "בחר את קובץ קרדיט 2000")
+
+    def _browse_gilboa_file(self):
+        self._browse_file(self.gilboa_edit, "בחר קובץ ספק - GILBOA")
+
+    def _browse_agency_file(self):
+        self._browse_file(self.agency_edit, "בחר קובץ ספק - AGENCY")
+
+    def _browse_odyssey_file(self):
+        self._browse_file(self.odyssey_edit, "בחר קובץ ספק - ODYSSEY")
+
+    def _browse_booster_file(self):
+        self._browse_file(self.booster_edit, "בחר קובץ ספק - BOOSTER")
+
+    def _show_message(self, title, text, icon):
+        msg = QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setIcon(icon)
+        msg.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        msg.exec()
+
+    def _append_log(self, message):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {message}"
+        self.log_view.append(line)
+
+        if self._active_log_path:
+            with open(self._active_log_path, "a", encoding="utf-8") as log_file:
+                log_file.write(line + "\n")
+
+        # Force repaint while running on the UI thread so logs are visible progressively.
+        QCoreApplication.processEvents()
+
+    def _start_live_log(self, output_folder):
+        os.makedirs(output_folder, exist_ok=True)
+        self._active_log_path = os.path.join(output_folder, "LOGER.log")
+        with open(self._active_log_path, "w", encoding="utf-8") as log_file:
+            log_file.write("")
+        return self._active_log_path
+
+    def _finish_live_log(self):
+        log_path = self._active_log_path
+        self._active_log_path = None
+        return log_path
+
+    def _on_run_clicked(self):
+        credit_file = self.credit_edit.text().strip()
+        output_folder = self.output_edit.text().strip()
+        gilboa_file = self.gilboa_edit.text().strip()
+        agency_file = self.agency_edit.text().strip()
+        odyssey_file = self.odyssey_edit.text().strip()
+        booster_file = self.booster_edit.text().strip()
+
+        if not credit_file:
+            self._show_message("שגיאת קלט", "יש לבחור קובץ קרדיט 2000.", QMessageBox.Icon.Warning)
+            return
+
+        if not output_folder:
+            self._show_message("שגיאת קלט", "יש לבחור תיקיית פלט.", QMessageBox.Icon.Warning)
+            return
+
+        if not any([gilboa_file, agency_file, odyssey_file, booster_file]):
+            self._show_message("שגיאת קלט", "יש לבחור לפחות קובץ ספק אחד.", QMessageBox.Icon.Warning)
+            return
+
+        self.run_button.setEnabled(False)
+        self.status_label.setText("מצב: מעבד נתונים...")
+        self.log_view.clear()
+        log_path = self._start_live_log(output_folder)
+        self._append_log("הריצה התחילה.")
+
+        try:
+            result = run_reconciliation(
+                credit_file=credit_file,
+                output_folder=output_folder,
+                gilboa_file=gilboa_file,
+                agency_file=agency_file,
+                odyssey_file=odyssey_file,
+                booster_file=booster_file,
+                log_func=self._append_log,
+            )
+            self.status_label.setText("מצב: הושלם בהצלחה")
+            self._append_log("הריצה הסתיימה בהצלחה.")
+            if log_path:
+                self._append_log(f"לוג נכתב לקובץ: {log_path}")
+
+            dashboard_data = result.get("dashboard_data")
+            if dashboard_data:
+                self._dashboard_window = SupplierReconciliationDashboard(dashboard_data, self)
+                self._dashboard_window.showMaximized()
+
+            self._show_message(
+                "הצלחה",
+                "הדוחות נוצרו בהצלחה:\n"
+                f"{result['matched']}\n"
+                f"{result['credit_only']}\n"
+                f"{result['suppliers_only']}\n"
+                f"LOGER: {log_path}",
+                QMessageBox.Icon.Information,
+            )
+        except Exception as exc:
+            self.status_label.setText("מצב: שגיאה")
+            self._append_log(f"שגיאה: {exc}")
+            if log_path:
+                self._append_log(f"לוג שגיאה נשמר: {log_path}")
+            self._show_message(
+                "שגיאה במהלך העיבוד",
+                f"אירעה שגיאה:\n{exc}",
+                QMessageBox.Icon.Critical,
+            )
+        finally:
+            self._finish_live_log()
+            self.run_button.setEnabled(True)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    app.setFont(QFont("Arial", 11))
+
+    window = ReconciliationWindow()
+    window.showMaximized()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    run_reconciliation()
+    sys.exit(main())
