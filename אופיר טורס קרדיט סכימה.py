@@ -48,6 +48,17 @@ def format_currency(value):
     return f"₪{value:,.0f}"
 
 
+def enforce_rtl_header_alignment(table):
+    table.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    header = table.horizontalHeader()
+    header.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+    header.setDefaultAlignment(ALIGN_RTL)
+    for col_idx in range(table.columnCount()):
+        item = table.horizontalHeaderItem(col_idx)
+        if item is not None:
+            item.setTextAlignment(ALIGN_RTL)
+
+
 def sum_amount(series):
     return float(pd.to_numeric(series, errors="coerce").fillna(0).sum())
 
@@ -170,6 +181,7 @@ class SupplierBreakdownDialog(QDialog):
 
         table = QTableWidget(3, 3)
         table.setHorizontalHeaderLabels(["קטגוריה", "כמות", "סכום"]) 
+        enforce_rtl_header_alignment(table)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -347,11 +359,11 @@ class SupplierExceptionsDialog(QDialog):
         headers = list(records[0].keys())
         table = QTableWidget(len(records), len(headers))
         table.setHorizontalHeaderLabels(headers)
+        enforce_rtl_header_alignment(table)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setAlternatingRowColors(True)
-        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         table.setFont(QFont("Arial", 10))
@@ -540,6 +552,7 @@ class SupplierReconciliationDashboard(QWidget):
 
         table = QTableWidget(len(self.dashboard_data["suppliers"]), 6)
         table.setHorizontalHeaderLabels(["שם הספק", "דיווח סולק", "דיווח ספק", "הפרש", "סטטוס", "פעולה"])
+        enforce_rtl_header_alignment(table)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -549,7 +562,6 @@ class SupplierReconciliationDashboard(QWidget):
         table.setMinimumHeight(460)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setMinimumSectionSize(120)
-        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         for row_idx, supplier_stats in enumerate(self.dashboard_data["suppliers"]):
             table.setItem(row_idx, 0, QTableWidgetItem(supplier_stats["supplier_name"]))
@@ -1072,8 +1084,8 @@ class ReconciliationWindow(QWidget):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 5)
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 6)
 
         self.output_edit = self._add_row(grid, 0, "תיקיית פלט", self._browse_output_folder, is_folder=True)
         self.credit_edit = self._add_row(grid, 1, "קובץ סולק קרדיט 2000", self._browse_credit_file)
@@ -1122,9 +1134,11 @@ class ReconciliationWindow(QWidget):
         line_edit.setMinimumHeight(34)
         line_edit.setPlaceholderText("לא נבחר" if not is_folder else "לא נבחרה תיקייה")
 
+        # With RTL layout mirroring: logical columns 0,1,2 are shown as right, middle, left.
+        # This gives the requested visual order: label -> button -> selected path.
         grid.addWidget(label, row_idx, 0, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
-        grid.addWidget(line_edit, row_idx, 1)
-        grid.addWidget(browse_button, row_idx, 2)
+        grid.addWidget(browse_button, row_idx, 1, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
+        grid.addWidget(line_edit, row_idx, 2)
         return line_edit
 
     def _browse_file(self, target_edit, title):
