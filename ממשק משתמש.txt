@@ -1,0 +1,128 @@
+import sys
+import os
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
+                             QFileDialog, QMessageBox)
+from PySide6.QtCore import Qt
+from reconciliation_logic import run_reconciliation
+
+class ReconciliationApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("כלי התאמות כרטיסי אשראי")
+        self.resize(600, 500)
+        
+        # הגדרת כיוון כתיבה מימין לשמאל עבור הממשק כולו
+        self.setLayoutDirection(Qt.RightToLeft)
+
+        # רכיב מרכזי
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QVBoxLayout(self.central_widget)
+        self.main_layout.setSpacing(15)
+        self.main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # שדות לאחסון נתיבים
+        self.processor_path_edit = QLineEdit()
+        self.provider_path_edits = [QLineEdit() for _ in range(4)]
+        self.output_folder_edit = QLineEdit()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        # כותרת
+        title_label = QLabel("מערכת התאמות גבייה")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("font-size: 20px; font-weight: bold; margin-bottom: 10px;")
+        self.main_layout.addWidget(title_label)
+
+        # בחירת דוח סולק
+        self.main_layout.addWidget(QLabel("דוח סולק:"))
+        proc_layout = QHBoxLayout()
+        proc_layout.addWidget(self.processor_path_edit)
+        btn_browse_proc = QPushButton("בחר קובץ")
+        btn_browse_proc.clicked.connect(self.browse_processor)
+        proc_layout.addWidget(btn_browse_proc)
+        self.main_layout.addLayout(proc_layout)
+
+        # בחירת דוחות ספקים
+        self.main_layout.addWidget(QLabel("דוחות ספקי גבייה (עד 4 ספקים):"))
+        for i in range(4):
+            prov_layout = QHBoxLayout()
+            self.provider_path_edits[i].setPlaceholderText(f"ספק {i+1}")
+            prov_layout.addWidget(self.provider_path_edits[i])
+            btn_browse_prov = QPushButton("בחר קובץ")
+            btn_browse_prov.clicked.connect(lambda checked, idx=i: self.browse_provider(idx))
+            prov_layout.addWidget(btn_browse_prov)
+            self.main_layout.addLayout(prov_layout)
+
+        # בחירת תיקיית פלט
+        self.main_layout.addWidget(QLabel("תיקיית פלט:"))
+        out_layout = QHBoxLayout()
+        out_layout.addWidget(self.output_folder_edit)
+        btn_browse_out = QPushButton("בחר תיקייה")
+        btn_browse_out.clicked.connect(self.browse_output)
+        out_layout.addWidget(btn_browse_out)
+        self.main_layout.addLayout(out_layout)
+
+        # כפתור הרצה
+        self.btn_run = QPushButton("בצע התאמה")
+        self.btn_run.setFixedHeight(40)
+        self.btn_run.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                font-weight: bold;
+                font-size: 14px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+        """)
+        self.btn_run.clicked.connect(self.execute_logic)
+        self.main_layout.addStretch()
+        self.main_layout.addWidget(self.btn_run)
+
+    def browse_processor(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "בחר דוח סולק", "", "Excel files (*.xlsx *.xls)")
+        if file_path:
+            self.processor_path_edit.setText(file_path)
+
+    def browse_provider(self, idx):
+        file_path, _ = QFileDialog.getOpenFileName(self, f"בחר דוח ספק {idx+1}", "", "Excel files (*.xlsx *.xls)")
+        if file_path:
+            self.provider_path_edits[idx].setText(file_path)
+
+    def browse_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "בחר תיקיית פלט")
+        if folder:
+            self.output_folder_edit.setText(folder)
+
+    def execute_logic(self):
+        proc_path = self.processor_path_edit.text()
+        out_folder = self.output_folder_edit.text()
+        provider_paths = [edit.text() for edit in self.provider_path_edits if edit.text()]
+
+        # בדיקות תקינות
+        if not proc_path or not out_folder:
+            QMessageBox.warning(self, "חסר מידע", "יש לבחור דוח סולק ותיקיית פלט")
+            return
+        
+        if not provider_paths:
+            QMessageBox.warning(self, "חסר מידע", "יש לבחור לפחות דוח ספק אחד")
+            return
+
+        # הרצת הלוגיקה
+        success, message = run_reconciliation(proc_path, provider_paths, out_folder)
+        
+        if success:
+            QMessageBox.information(self, "הצלחה", message)
+        else:
+            QMessageBox.critical(self, "שגיאה", message)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = ReconciliationApp()
+    window.show()
+    sys.exit(app.exec())

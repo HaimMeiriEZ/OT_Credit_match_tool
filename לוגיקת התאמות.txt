@@ -1,0 +1,60 @@
+import pandas as pd
+import os
+
+def run_reconciliation(processor_file, provider_files, output_folder):
+    """
+    מבצע את תהליך ההתאמה בין דוח הסולק לדוחות הספקים.
+    """
+    try:
+        # 1. טעינת דוח הסולק
+        # נניח שיש עמודה בשם 'TransactionID' או 'Reference' - כדאי להתאים זאת לשמות האמיתיים
+        df_processor = pd.read_excel(processor_file)
+        
+        # 2. טעינת ואיחוד דוחות הספקים (4 ספקים)
+        provider_dfs = []
+        for file in provider_files:
+            if file:
+                df_temp = pd.read_excel(file)
+                provider_dfs.append(df_temp)
+        
+        df_providers = pd.concat(provider_dfs, ignore_index=True)
+
+        # 3. ניקוי נתונים בסיסי (הסרת רווחים, המרה לטקסט לצורך השוואה מדויקת)
+        # נניח ששם העמודה המזהה הוא 'ID'
+        # הערה: יש לשנות את שמות העמודות בהתאם לקבצים בפועל
+        join_col = 'ID' 
+        
+        df_processor[join_col] = df_processor[join_col].astype(str).str.strip()
+        df_providers[join_col] = df_providers[join_col].astype(str).str.strip()
+
+        # 4. ביצוע ה-Merge (השוואה)
+        # משתמשים ב-outer join עם indicator כדי לדעת איפה כל שורה קיימת
+        merged = pd.merge(
+            df_processor, 
+            df_providers, 
+            on=join_col, 
+            how='outer', 
+            suffixes=('_processor', '_provider'),
+            indicator=True
+        )
+
+        # 5. פיצול ל-3 קבוצות לפי הדרישה
+        
+        # א. קיים בשניהם (Matched)
+        matched = merged[merged['_merge'] == 'both']
+        
+        # ב. קיים בסולק אך לא בספק (Missing in Provider)
+        only_processor = merged[merged['_merge'] == 'left_only']
+        
+        # ג. קיים בספק אך לא בסולק (Missing in Processor)
+        only_provider = merged[merged['_merge'] == 'right_only']
+
+        # 6. שמירה לקבצים בתיקיית היעד
+        matched.drop(columns=['_merge']).to_excel(os.path.join(output_folder, '1_matched_records.xlsx'), index=False)
+        only_processor.drop(columns=['_merge']).to_excel(os.path.join(output_folder, '2_only_in_processor.xlsx'), index=False)
+        only_provider.drop(columns=['_merge']).to_excel(os.path.join(output_folder, '3_only_in_providers.xlsx'), index=False)
+
+        return True, "העיבוד הושלם בהצלחה! הקבצים נשמרו בתיקיית היעד."
+    
+    except Exception as e:
+        return False, f"שגיאה בעיבוד: {str(e)}"
