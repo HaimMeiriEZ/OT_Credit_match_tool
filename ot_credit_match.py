@@ -200,55 +200,143 @@ class SupplierBreakdownDialog(QDialog):
         layout.addWidget(table)
 
 
-class VennComparisonWidget(QWidget):
+class ReconciliationFlowWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.left_only = 0
-        self.overlap = 0
-        self.right_only = 0
-        self.setMinimumHeight(180)
+        self.supplier_name = ""
+        self.credit_total = 0.0
+        self.credit_count = 0
+        self.supplier_total = 0.0
+        self.supplier_count = 0
+        self.matched_amount = 0.0
+        self.matched_count = 0
+        self.credit_only_amount = 0.0
+        self.credit_only_count = 0
+        self.supplier_only_amount = 0.0
+        self.supplier_only_count = 0
+        self.setMinimumHeight(260)
 
-    def set_values(self, left_only, overlap, right_only):
-        self.left_only = int(left_only)
-        self.overlap = int(overlap)
-        self.right_only = int(right_only)
+    def set_data(
+        self,
+        supplier_name,
+        credit_total,
+        credit_count,
+        supplier_total,
+        supplier_count,
+        matched_amount,
+        matched_count,
+        credit_only_amount,
+        credit_only_count,
+        supplier_only_amount,
+        supplier_only_count,
+    ):
+        self.supplier_name = supplier_name
+        self.credit_total = credit_total
+        self.credit_count = credit_count
+        self.supplier_total = supplier_total
+        self.supplier_count = supplier_count
+        self.matched_amount = matched_amount
+        self.matched_count = matched_count
+        self.credit_only_amount = credit_only_amount
+        self.credit_only_count = credit_only_count
+        self.supplier_only_amount = supplier_only_amount
+        self.supplier_only_count = supplier_only_count
         self.update()
 
     def paintEvent(self, _event):
+        from PySide6.QtCore import QRect
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w = self.width()
         h = self.height()
-        diameter = min(140, max(90, int(w * 0.28)))
-        radius = diameter // 2
-        center_y = max(58, h // 2 - 10)
-        left_x = w // 2 - int(radius * 1.15)
-        right_x = w // 2 + int(radius * 1.15)
 
-        left_color = QColor("#60a5fa")
-        left_color.setAlpha(130)
-        right_color = QColor("#34d399")
-        right_color.setAlpha(130)
+        box_w = max(170, int(w * 0.26))
+        box_h = max(72, int(h * 0.29))
+        margin_x = max(12, int(w * 0.02))
+        margin_y = max(10, int(h * 0.04))
 
-        painter.setPen(QPen(QColor("#2563eb"), 2))
-        painter.setBrush(left_color)
-        painter.drawEllipse(left_x - radius, center_y - radius, diameter, diameter)
+        left_x = margin_x
+        right_x = w - margin_x - box_w
 
-        painter.setPen(QPen(QColor("#059669"), 2))
-        painter.setBrush(right_color)
-        painter.drawEllipse(right_x - radius, center_y - radius, diameter, diameter)
+        top_y = margin_y
+        bot_y = h - margin_y - box_h
+        mid_y = (top_y + bot_y + box_h) // 2 - box_h // 2
 
-        painter.setPen(QPen(QColor("#111827")))
-        painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        painter.drawText(left_x - radius + 10, center_y, f"{self.left_only}")
-        painter.drawText(w // 2 - 12, center_y, f"{self.overlap}")
-        painter.drawText(right_x + radius - 28, center_y, f"{self.right_only}")
+        # ─── helper: draw a rounded box with 3 text lines ───────────────────
+        def draw_box(bx, by, fill_hex, border_hex, line1, line2, line3):
+            fill = QColor(fill_hex)
+            border = QColor(border_hex)
+            painter.setBrush(fill)
+            painter.setPen(QPen(border, 2))
+            painter.drawRoundedRect(bx, by, box_w, box_h, 8, 8)
+            painter.setPen(QPen(QColor("#111827")))
+            line_h = box_h // 3
+            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+            painter.drawText(QRect(bx + 4, by + 2, box_w - 8, line_h),
+                             Qt.AlignmentFlag.AlignCenter, line1)
+            painter.setFont(QFont("Arial", 8))
+            painter.drawText(QRect(bx + 4, by + line_h + 2, box_w - 8, line_h),
+                             Qt.AlignmentFlag.AlignCenter, line2)
+            painter.drawText(QRect(bx + 4, by + line_h * 2 + 2, box_w - 8, line_h),
+                             Qt.AlignmentFlag.AlignCenter, line3)
 
-        painter.setFont(QFont("Arial", 9))
-        painter.drawText(left_x - radius, center_y + radius + 22, "סולק בלבד")
-        painter.drawText(w // 2 - 26, center_y + radius + 22, "חיתוך")
-        painter.drawText(right_x + radius - 66, center_y + radius + 22, "ספק בלבד")
+        # ─── left: source boxes (gray) ──────────────────────────────────────
+        draw_box(
+            left_x, top_y,
+            "#f3f4f6", "#6b7280",
+            "קרדיט 2000",
+            f"{self.credit_count:,} רשומות",
+            format_currency(self.credit_total),
+        )
+        draw_box(
+            left_x, bot_y,
+            "#f3f4f6", "#6b7280",
+            self.supplier_name or "ספק גבייה",
+            f"{self.supplier_count:,} רשומות",
+            format_currency(self.supplier_total),
+        )
+
+        # ─── right: result boxes ─────────────────────────────────────────────
+        draw_box(
+            right_x, top_y,
+            "#fee2e2", "#dc2626",
+            "קיים בקרדיט - חסר בספק",
+            f"{self.credit_only_count:,} רשומות",
+            format_currency(self.credit_only_amount),
+        )
+        draw_box(
+            right_x, mid_y,
+            "#d1fae5", "#059669",
+            "רשומות משותפות",
+            f"{self.matched_count:,} רשומות",
+            format_currency(self.matched_amount),
+        )
+        draw_box(
+            right_x, bot_y,
+            "#fee2e2", "#dc2626",
+            "קיים בספק - חסר בקרדיט",
+            f"{self.supplier_only_count:,} רשומות",
+            format_currency(self.supplier_only_amount),
+        )
+
+        # ─── Z-shape connector lines (black) ─────────────────────────────────
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#111827"), 2))
+
+        cx_left = left_x + box_w        # right edge of left boxes
+        cx_right = right_x              # left edge of right boxes
+
+        credit_mid_y = top_y + box_h // 2
+        supplier_mid_y = bot_y + box_h // 2
+        match_mid_y = mid_y + box_h // 2
+        credit_only_mid_y = top_y + box_h // 2
+        supplier_only_mid_y = bot_y + box_h // 2
+
+        painter.drawLine(cx_left, credit_mid_y, cx_right, credit_only_mid_y)
+        painter.drawLine(cx_left, credit_mid_y, cx_right, match_mid_y)
+        painter.drawLine(cx_left, supplier_mid_y, cx_right, match_mid_y)
+        painter.drawLine(cx_left, supplier_mid_y, cx_right, supplier_only_mid_y)
 
         painter.end()
 
@@ -269,11 +357,6 @@ class SupplierExceptionsDialog(QDialog):
         title = make_rtl_label(f"חריגים מתוך הנתונים האמיתיים - {supplier_stats['supplier_name']}", bold=True)
         title.setFont(QFont("Arial", 13, QFont.Weight.Bold))
         main_layout.addWidget(title)
-
-        summary = make_rtl_label(
-            f"רק בקרדיט: {supplier_stats['credit_only_count']} | רק בספק: {supplier_stats['supplier_only_count']}"
-        )
-        main_layout.addWidget(summary)
 
         export_button = QPushButton("ייצוא חריגים לאקסל")
         export_button.setMinimumHeight(38)
@@ -309,43 +392,11 @@ class SupplierExceptionsDialog(QDialog):
         )
         drilldown_layout = QVBoxLayout(drilldown_box)
 
-        drilldown_title = make_rtl_label("התאמה כמותית וכספית בלחיצה על רשומה", bold=True)
+        drilldown_title = make_rtl_label("התאמה כמותית וכספית", bold=True)
         drilldown_layout.addWidget(drilldown_title)
 
-        self.selected_record_label = make_rtl_label("בחר רשומה בטבלה כדי לראות התאמה כמותית וכספית")
-        drilldown_layout.addWidget(self.selected_record_label)
-
-        quantitative_row = QHBoxLayout()
-        self.processor_count_label = make_rtl_label("כמות בצד סולק: 0")
-        self.overlap_count_label = make_rtl_label("כמות משותפת: 0")
-        self.supplier_count_label = make_rtl_label("כמות בצד ספק: 0")
-        quantitative_row.addWidget(self.processor_count_label)
-        quantitative_row.addWidget(self.overlap_count_label)
-        quantitative_row.addWidget(self.supplier_count_label)
-        drilldown_layout.addLayout(quantitative_row)
-
-        monetary_row = QHBoxLayout()
-        self.processor_amount_label = make_rtl_label("סכום סולק: ₪0")
-        self.overlap_amount_label = make_rtl_label("סכום משותף: ₪0")
-        self.supplier_amount_label = make_rtl_label("סכום ספק: ₪0")
-        self.diff_amount_label = make_rtl_label("פער: ₪0")
-        monetary_row.addWidget(self.processor_amount_label)
-        monetary_row.addWidget(self.overlap_amount_label)
-        monetary_row.addWidget(self.supplier_amount_label)
-        monetary_row.addWidget(self.diff_amount_label)
-        drilldown_layout.addLayout(monetary_row)
-
-        self.venn_widget = VennComparisonWidget()
+        self.venn_widget = ReconciliationFlowWidget()
         drilldown_layout.addWidget(self.venn_widget)
-
-        venn_amounts = QHBoxLayout()
-        self.left_only_amount_label = make_rtl_label("סולק בלבד: ₪0")
-        self.intersection_amount_label = make_rtl_label("חיתוך: ₪0")
-        self.right_only_amount_label = make_rtl_label("ספק בלבד: ₪0")
-        venn_amounts.addWidget(self.left_only_amount_label)
-        venn_amounts.addWidget(self.intersection_amount_label)
-        venn_amounts.addWidget(self.right_only_amount_label)
-        drilldown_layout.addLayout(venn_amounts)
 
         main_layout.addWidget(drilldown_box)
 
@@ -449,22 +500,19 @@ class SupplierExceptionsDialog(QDialog):
         supplier_total = float(self.supplier_stats.get("supplier_total", matched_amount + supplier_only_amount))
         diff_amount = float(self.supplier_stats.get("diff_amount", supplier_total - processor_total))
 
-        self.selected_record_label.setText(self._record_display_text(selected_record, source_label))
-
-        self.processor_count_label.setText(f"כמות בצד סולק: {processor_count}")
-        self.overlap_count_label.setText(f"כמות משותפת: {matched_count}")
-        self.supplier_count_label.setText(f"כמות בצד ספק: {supplier_count}")
-
-        self.processor_amount_label.setText(f"סכום סולק: {format_currency(processor_total)}")
-        self.overlap_amount_label.setText(f"סכום משותף: {format_currency(matched_amount)}")
-        self.supplier_amount_label.setText(f"סכום ספק: {format_currency(supplier_total)}")
-        self.diff_amount_label.setText(f"פער: {format_currency(diff_amount)}")
-
-        self.left_only_amount_label.setText(f"סולק בלבד: {format_currency(credit_only_amount)}")
-        self.intersection_amount_label.setText(f"חיתוך: {format_currency(matched_amount)}")
-        self.right_only_amount_label.setText(f"ספק בלבד: {format_currency(supplier_only_amount)}")
-
-        self.venn_widget.set_values(credit_only_count, matched_count, supplier_only_count)
+        self.venn_widget.set_data(
+            supplier_name=self.supplier_stats.get("supplier_name", ""),
+            credit_total=processor_total,
+            credit_count=processor_count,
+            supplier_total=supplier_total,
+            supplier_count=supplier_count,
+            matched_amount=matched_amount,
+            matched_count=matched_count,
+            credit_only_amount=credit_only_amount,
+            credit_only_count=credit_only_count,
+            supplier_only_amount=supplier_only_amount,
+            supplier_only_count=supplier_only_count,
+        )
 
     def _export_exceptions_to_excel(self):
         default_name = f"חריגים_{self.supplier_stats['supplier_key']}.xlsx"
@@ -645,22 +693,23 @@ def load_gilboa(file_path):
     if "Fop" in df.columns:
         df = df[df["Fop"].str.strip().isin(["PDQ", "CRD"])]
 
-    # איחוד שורות לפי Doc number במידה וקיים
-    if "Doc number" in df.columns:
-        df["origin amount_num"] = df["origin amount"].apply(clean_amount)
-        
-        agg_dict = {col: "first" for col in df.columns if col != "origin amount_num"}
-        agg_dict["origin amount_num"] = "sum"
-        
-        df = df.groupby("Doc number", as_index=False).agg(agg_dict)
-        
-        df["origin amount"] = df["origin amount_num"].astype(str)
-        df.drop(columns=["origin amount_num"], inplace=True)
-
     df["match_card"] = df["Details"].apply(clean_card)
     df["match_amount"] = df["origin amount"].apply(clean_amount)
     df["match_auth"] = df["ref"].apply(clean_auth)
     df["source_supplier"] = "גלבוע"
+
+    # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
+    group_keys = ["match_card", "match_auth", "source_supplier"]
+    if "Doc number" in df.columns:
+        group_keys = ["Doc number"] + group_keys
+    mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+    df_to_group = df[mask].copy()
+    df_no_group = df[~mask].copy()
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    agg_dict["match_amount"] = "sum"
+    df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
+    df = pd.concat([df_grouped, df_no_group], ignore_index=True)
+
     return df
 
 
@@ -717,6 +766,17 @@ def load_agency(file_path):
     df["match_pnr"] = df["מס' תיק"].apply(lambda x: clean_pnr(x, 6))
     df["match_auth"] = df["מספר אישור"].apply(clean_auth)
     df["source_supplier"] = "אייגנסי"
+
+    # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
+    group_keys = ["match_card", "match_pnr", "match_auth", "source_supplier"]
+    mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+    df_to_group = df[mask].copy()
+    df_no_group = df[~mask].copy()
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    agg_dict["match_amount"] = "sum"
+    df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
+    df = pd.concat([df_grouped, df_no_group], ignore_index=True)
+
     return df
 
 
@@ -749,6 +809,17 @@ def load_odyssey(file_path):
     df["match_pnr"] = df["Pnr"].apply(lambda x: clean_pnr(x, 6))
     df["match_auth"] = ""
     df["source_supplier"] = "אודיסאה"
+
+    # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים (ללא match_auth שתמיד ריק)
+    group_keys = ["match_card", "match_pnr", "source_supplier"]
+    mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+    df_to_group = df[mask].copy()
+    df_no_group = df[~mask].copy()
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    agg_dict["match_amount"] = "sum"
+    df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
+    df = pd.concat([df_grouped, df_no_group], ignore_index=True)
+
     return df
 
 
@@ -763,23 +834,24 @@ def load_booster(file_path):
     if "Payment Method" in df.columns:
         df = df[df["Payment Method"].astype(str).str.strip().str.lower().str.startswith("credit card", na=False)]
 
-    # איחוד שורות לפי Document No. במידה וקיים
-    if "Document No." in df.columns:
-        df["Amount_num"] = df["Amount"].apply(clean_amount)
-        
-        agg_dict = {col: "first" for col in df.columns if col != "Amount_num"}
-        agg_dict["Amount_num"] = "sum"
-        
-        df = df.groupby("Document No.", as_index=False).agg(agg_dict)
-        
-        df["Amount"] = df["Amount_num"].astype(str)
-        df.drop(columns=["Amount_num"], inplace=True)
-
     df["match_card"] = df["Payment Method"].apply(clean_card)
     df["match_amount"] = df["Amount"].apply(clean_amount)
     df["match_pnr"] = df["Credit Account Name"].apply(lambda x: clean_pnr(x, 6))
     df["match_auth"] = df["Description"].apply(clean_auth)
     df["source_supplier"] = "בוסטר"
+
+    # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
+    group_keys = ["match_card", "match_pnr", "match_auth", "source_supplier"]
+    if "Document No." in df.columns:
+        group_keys = ["Document No."] + group_keys
+    mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+    df_to_group = df[mask].copy()
+    df_no_group = df[~mask].copy()
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    agg_dict["match_amount"] = "sum"
+    df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
+    df = pd.concat([df_grouped, df_no_group], ignore_index=True)
+
     return df
 
 
