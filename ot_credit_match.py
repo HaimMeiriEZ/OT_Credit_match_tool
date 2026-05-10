@@ -173,7 +173,7 @@ class SupplierBreakdownDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"פירוט תנועות - {supplier_stats['supplier_name']}")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.resize(560, 280)
+        self.resize(448, 224)
 
         layout = QVBoxLayout(self)
         title = make_rtl_label(f"פירוט תנועות עבור {supplier_stats['supplier_name']}", bold=True)
@@ -347,7 +347,7 @@ class SupplierExceptionsDialog(QDialog):
         self.supplier_stats = supplier_stats
         self.setWindowTitle(f"חריגים - {supplier_stats['supplier_name']}")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.resize(1200, 760)
+        self.resize(960, 608)
         self.credit_records = supplier_stats.get("credit_exception_records", [])
         self.supplier_records = supplier_stats.get("supplier_exception_records", [])
         self.credit_table = None
@@ -365,6 +365,11 @@ class SupplierExceptionsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #cbd5e1; top: -1px; }"
+            "QTabBar::tab { border: 1px solid #cbd5e1; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; padding: 8px 14px; margin-left: 4px; color: #334155; font-weight: 600; }"
+            "QTabBar::tab:selected { background-color: #e8e8e8; color: #111827; }"
+        )
 
         credit_tab = QWidget()
         credit_layout = QVBoxLayout(credit_tab)
@@ -382,8 +387,8 @@ class SupplierExceptionsDialog(QDialog):
         )
         supplier_layout.addWidget(self.supplier_table)
 
-        tabs.addTab(credit_tab, "חריגים - רק בקרדיט")
-        tabs.addTab(supplier_tab, "חריגים - רק בספק")
+        tabs.addTab(credit_tab, "חריגים - רק בקרדיט (סולק)")
+        tabs.addTab(supplier_tab, "חריגים - רק בספק (דוח ספק)")
         main_layout.addWidget(tabs)
 
         drilldown_box = QFrame()
@@ -411,6 +416,13 @@ class SupplierExceptionsDialog(QDialog):
         table = QTableWidget(len(records), len(headers))
         table.setHorizontalHeaderLabels(headers)
         enforce_rtl_header_alignment(table)
+        
+        # Center-align all column headers
+        for col_idx in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col_idx)
+            if header_item is not None:
+                header_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -559,8 +571,8 @@ class SupplierReconciliationDashboard(QWidget):
         self._details_dialogs = []
         self.setWindowTitle("פירוט התאמה לפי ספק")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
-        self.setMinimumSize(1200, 720)
-        self.resize(1440, 860)
+        self.setMinimumSize(960, 576)
+        self.resize(1152, 688)
         self._build_ui()
 
     def _make_kpi_card(self, title_text, value_text, accent_color):
@@ -601,6 +613,11 @@ class SupplierReconciliationDashboard(QWidget):
         table = QTableWidget(len(self.dashboard_data["suppliers"]), 6)
         table.setHorizontalHeaderLabels(["שם הספק", "דיווח סולק", "דיווח ספק", "הפרש", "סטטוס", "פעולה"])
         enforce_rtl_header_alignment(table)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+        for col_idx in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col_idx)
+            if header_item is not None:
+                header_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
@@ -629,12 +646,40 @@ class SupplierReconciliationDashboard(QWidget):
             table.setItem(row_idx, 4, QTableWidgetItem(status_text))
 
             action_btn = QPushButton("הצג חריגים")
+            action_btn.setStyleSheet(
+                "QPushButton { background-color: #e8e8e8; color: #333333; border: 1px solid #c0c0c0; border-radius: 4px; }"
+                "QPushButton:hover { background-color: #d8d8d8; }"
+                "QPushButton:pressed { background-color: #c8c8c8; }"
+            )
             action_btn.clicked.connect(
                 lambda _checked=False, data=supplier_stats: self._show_supplier_details(data)
             )
             table.setCellWidget(row_idx, 5, action_btn)
 
         layout.addWidget(table)
+
+        legend_box = QFrame()
+        legend_box.setStyleSheet(
+            "QFrame { background-color: #f8fafc; border: 1px solid #d1d5db; border-radius: 8px; }"
+        )
+        legend_layout = QHBoxLayout(legend_box)
+        legend_layout.setContentsMargins(12, 8, 12, 8)
+        legend_layout.setSpacing(14)
+
+        legend_title = QLabel("מקרא סטטוס:")
+        legend_title.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        legend_title.setAlignment(ALIGN_RTL)
+        legend_layout.addWidget(legend_title)
+
+        legend_ok = QLabel("✅ מאוזן (הפרש 0)")
+        legend_warn = QLabel("⚠️ ספק נמוך מהסולק (הפרש שלילי)")
+        legend_err = QLabel("❌ ספק גבוה מהסולק (הפרש חיובי)")
+        for legend_item in (legend_ok, legend_warn, legend_err):
+            legend_item.setAlignment(ALIGN_RTL)
+            legend_layout.addWidget(legend_item)
+
+        legend_layout.addStretch()
+        layout.addWidget(legend_box)
 
     def _show_supplier_details(self, supplier_stats):
         dialog = SupplierExceptionsDialog(supplier_stats, self)
@@ -1133,8 +1178,8 @@ class ReconciliationWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("כלי התאמות קרדיט 2000")
-        self.setMinimumSize(1200, 760)
-        self.resize(1440, 900)
+        self.setMinimumSize(960, 608)
+        self.resize(1152, 720)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self._active_log_path = None
         self._dashboard_window = None
@@ -1172,6 +1217,20 @@ class ReconciliationWindow(QWidget):
         self.status_label.setStyleSheet("color: #666;")
         main_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
 
+        self.run_button = QPushButton("הפעל התאמה")
+        self.run_button.setFont(QFont("Arial", 11, QFont.Weight.Bold))
+        self.run_button.setStyleSheet(
+            "QPushButton { background-color: #bfe4ff; color: #0b3a66; border: 1px solid #8cc6f0; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #a9daff; }"
+            "QPushButton:pressed { background-color: #94d0ff; }"
+            "QPushButton:disabled { background-color: #d9ebf7; color: #7a97b0; }"
+        )
+        self.run_button.clicked.connect(self._on_run_clicked)
+        self.run_button.setFixedHeight(23)
+        self.run_button.setFixedWidth(160)
+        self.run_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        main_layout.addWidget(self.run_button, alignment=Qt.AlignmentFlag.AlignHCenter)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
@@ -1183,12 +1242,6 @@ class ReconciliationWindow(QWidget):
         main_layout.addWidget(make_rtl_label("לוג פעילות:"), alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
         main_layout.addWidget(self.log_view)
 
-        self.run_button = QPushButton("הפעל התאמה")
-        self.run_button.setFont(QFont("Arial", 11, QFont.Weight.Bold))
-        self.run_button.clicked.connect(self._on_run_clicked)
-        self.run_button.setMinimumHeight(46)
-        main_layout.addWidget(self.run_button)
-
         self.setLayout(main_layout)
 
     def _add_row(self, grid, row_idx, label_text, browse_handler, is_folder=False):
@@ -1196,6 +1249,11 @@ class ReconciliationWindow(QWidget):
         browse_button = QPushButton("בחירה")
         browse_button.setMinimumWidth(130)
         browse_button.setMinimumHeight(34)
+        browse_button.setStyleSheet(
+            "QPushButton { background-color: #e8e8e8; color: #333333; border: 1px solid #c0c0c0; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #d8d8d8; }"
+            "QPushButton:pressed { background-color: #c8c8c8; }"
+        )
         browse_button.clicked.connect(browse_handler)
 
         line_edit = QLineEdit()
@@ -1319,11 +1377,6 @@ class ReconciliationWindow(QWidget):
             if log_path:
                 self._append_log(f"לוג נכתב לקובץ: {log_path}")
 
-            dashboard_data = result.get("dashboard_data")
-            if dashboard_data:
-                self._dashboard_window = SupplierReconciliationDashboard(dashboard_data, self)
-                self._dashboard_window.showMaximized()
-
             self._show_message(
                 "הצלחה",
                 "הדוחות נוצרו בהצלחה:\n"
@@ -1333,6 +1386,11 @@ class ReconciliationWindow(QWidget):
                 f"LOGER: {log_path}",
                 QMessageBox.Icon.Information,
             )
+
+            dashboard_data = result.get("dashboard_data")
+            if dashboard_data:
+                self._dashboard_window = SupplierReconciliationDashboard(dashboard_data)
+                self._dashboard_window.show()
         except Exception as exc:
             self.status_label.setText("מצב: שגיאה")
             self._append_log(f"שגיאה: {exc}")
@@ -1354,7 +1412,7 @@ def main():
     app.setFont(QFont("Arial", 11))
 
     window = ReconciliationWindow()
-    window.showMaximized()
+    window.show()
     return app.exec()
 
 
