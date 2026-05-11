@@ -71,6 +71,60 @@ def classify_diff_status(diff_value):
     return "error", "❌"
 
 
+# =====================================================================
+# קבועים ועזרים לדריל-דאון שורות מקור (UNMATCH raw rows)
+# =====================================================================
+
+# עמודות פנימיות שנוצרו בעיבוד – לא מוצגות למשתמש
+INTERNAL_COLS = {
+    "match_card", "match_pnr", "match_auth", "match_amount",
+    "source_supplier", "ספק_משויך", "מסוף_נקי", "מספר הזמנה_נקי",
+    "credit_uid", "supplier_uid",
+}
+
+# מפתחות קיבוץ לפי מקור
+CREDIT_GROUP_KEYS = ["match_card", "match_pnr", "match_auth", "ספק_משויך"]
+SUPPLIER_GROUP_KEYS = {
+    "גלבוע":    ["match_card", "match_auth", "source_supplier"],
+    "אייגנסי":  ["match_card", "match_pnr", "match_auth", "source_supplier"],
+    "אודיסאה":  ["match_card", "match_pnr", "source_supplier"],
+    "בוסטר":    ["match_card", "match_pnr", "match_auth", "source_supplier"],
+}
+
+# תווים לא חוקיים בשמות גיליון Excel – openpyxl 3.x מוחה גם על שמות עמודות
+_INVALID_COL_CHARS_RE = re.compile(r'[\\*?:/\[\]]')
+
+
+def _sanitize_col(name):
+    """מחליף תווים לא-חוקיים ב-Excel בקו-תחתון."""
+    return _INVALID_COL_CHARS_RE.sub('_', str(name))
+
+
+def _build_raw_records_map(grouped_df, raw_df, group_keys):
+    """
+    לכל שורה ב-grouped_df מחזירה את השורות המקוריות התואמות מ-raw_df.
+    מחזיר list[list[dict]] – אינדקס זהה לאינדקס שורות ב-grouped_df.
+    שמות עמודות מנוקים מתווים לא-חוקיים לאקסל (/, *, ?, :, [, ]).
+    """
+    if raw_df is None or raw_df.empty or grouped_df.empty:
+        return [[] for _ in range(len(grouped_df))]
+
+    display_cols = [c for c in raw_df.columns if c not in INTERNAL_COLS]
+    # rename map: original col → sanitized col
+    rename_map = {c: _sanitize_col(c) for c in display_cols if _INVALID_COL_CHARS_RE.search(str(c))}
+    result = []
+    for _, row in grouped_df.iterrows():
+        mask = pd.Series(True, index=raw_df.index)
+        for key in group_keys:
+            if key in raw_df.columns and key in row.index:
+                mask &= raw_df[key].astype(str).str.strip() == str(row.get(key, "")).strip()
+        matching_df = raw_df.loc[mask, display_cols].fillna("")
+        if rename_map:
+            matching_df = matching_df.rename(columns=rename_map)
+        result.append(matching_df.to_dict("records"))
+    return result
+
+
 def compute_supplier_dashboard_data(
     df_credit,
     df_all_suppliers,
@@ -78,6 +132,8 @@ def compute_supplier_dashboard_data(
     df_only_in_credit,
     df_only_in_suppliers,
     supplier_cols_dict,
+    df_raw_credit=None,
+    df_raw_suppliers_dict=None,
 ):
     supplier_map = {
         "גלבוע": "ספק גבייה - גילבוע",
@@ -146,6 +202,18 @@ def compute_supplier_dashboard_data(
                     supplier_only_rows[supplier_exception_cols].fillna("").to_dict("records")
                     if supplier_exception_cols
                     else []
+                ),
+                "credit_exception_raw_records_map": (
+                    _build_raw_records_map(credit_only_supplier, df_raw_credit, CREDIT_GROUP_KEYS)
+                    if df_raw_credit is not None else []
+                ),
+                "supplier_exception_raw_records_map": (
+                    _build_raw_records_map(
+                        supplier_only_rows,
+                        (df_raw_suppliers_dict or {}).get(supplier_key),
+                        SUPPLIER_GROUP_KEYS.get(supplier_key, []),
+                    )
+                    if df_raw_suppliers_dict is not None else []
                 ),
             }
         )
@@ -341,6 +409,65 @@ class ReconciliationFlowWidget(QWidget):
         painter.end()
 
 
+class RawRowsDialog(QDialog):
+    """פופאפ המציג את כל השורות המקוריות שהרכיבו רשומת UNMATCH אחת."""
+
+    def __init__(self, raw_records, title, parent=None):
+        super().__init__(parent)
+        self.raw_records = raw_records
+        self.setWindowTitle(title)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.resize(900, 500)
+
+        layout = QVBoxLayout(self)
+
+        count_label = make_rtl_label(
+            f"{len(raw_records)} שורות מקור מרכיבות רשומה זו" if raw_records
+            else "לא נמצאו שורות מקור לרשומה זו.",
+            bold=True,
+        )
+        layout.addWidget(count_label)
+
+        if raw_records:
+            headers = list(raw_records[0].keys())
+            table = QTableWidget(len(raw_records), len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            enforce_rtl_header_alignment(table)
+            for col_idx in range(table.columnCount()):
+                item = table.horizontalHeaderItem(col_idx)
+                if item is not None:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+            table.verticalHeader().setVisible(False)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setAlternatingRowColors(True)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeader().setStretchLastSection(True)
+            table.setFont(QFont("Arial", 10))
+            for row_idx, row in enumerate(raw_records):
+                for col_idx, header in enumerate(headers):
+                    table.setItem(row_idx, col_idx, QTableWidgetItem(str(row.get(header, ""))))
+            layout.addWidget(table)
+
+        export_btn = QPushButton("ייצוא לאקסל")
+        export_btn.clicked.connect(self._export)
+        layout.addWidget(export_btn, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignAbsolute)
+
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "שמור שורות מקור", "שורות_מקור.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            pd.DataFrame(self.raw_records).to_excel(path, index=False)
+            QMessageBox.information(self, "הצלחה", f"הקובץ נשמר:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "שגיאה", f"שגיאה בייצוא:\n{exc}")
+
+
 class SupplierExceptionsDialog(QDialog):
     def __init__(self, supplier_stats, parent=None):
         super().__init__(parent)
@@ -350,6 +477,8 @@ class SupplierExceptionsDialog(QDialog):
         self.resize(960, 608)
         self.credit_records = supplier_stats.get("credit_exception_records", [])
         self.supplier_records = supplier_stats.get("supplier_exception_records", [])
+        self.credit_raw_map = supplier_stats.get("credit_exception_raw_records_map", [])
+        self.supplier_raw_map = supplier_stats.get("supplier_exception_raw_records_map", [])
         self.credit_table = None
         self.supplier_table = None
 
@@ -373,6 +502,9 @@ class SupplierExceptionsDialog(QDialog):
 
         credit_tab = QWidget()
         credit_layout = QVBoxLayout(credit_tab)
+        credit_hint = make_rtl_label("💡 לחץ על שורה לצפייה בשורות המקור המלאות")
+        credit_hint.setStyleSheet("color: #6b7280; font-size: 10px;")
+        credit_layout.addWidget(credit_hint)
         self.credit_table = self._build_records_table(
             self.credit_records,
             empty_message="אין חריגים בצד הקרדיט לספק זה.",
@@ -381,6 +513,9 @@ class SupplierExceptionsDialog(QDialog):
 
         supplier_tab = QWidget()
         supplier_layout = QVBoxLayout(supplier_tab)
+        supplier_hint = make_rtl_label("💡 לחץ על שורה לצפייה בשורות המקור המלאות")
+        supplier_hint.setStyleSheet("color: #6b7280; font-size: 10px;")
+        supplier_layout.addWidget(supplier_hint)
         self.supplier_table = self._build_records_table(
             self.supplier_records,
             empty_message="אין חריגים בצד הספק לספק זה.",
@@ -446,6 +581,11 @@ class SupplierExceptionsDialog(QDialog):
                     "חריג סולק",
                 )
             )
+            self.credit_table.clicked.connect(
+                lambda: self._show_raw_rows(
+                    self.credit_table, self.credit_raw_map, "רק בקרדיט"
+                )
+            )
 
         if isinstance(self.supplier_table, QTableWidget):
             self.supplier_table.itemSelectionChanged.connect(
@@ -453,6 +593,11 @@ class SupplierExceptionsDialog(QDialog):
                     self.supplier_table,
                     self.supplier_records,
                     "חריג ספק",
+                )
+            )
+            self.supplier_table.clicked.connect(
+                lambda: self._show_raw_rows(
+                    self.supplier_table, self.supplier_raw_map, "רק בספק"
                 )
             )
 
@@ -466,6 +611,19 @@ class SupplierExceptionsDialog(QDialog):
             return
 
         self._update_drilldown(records[row], source_label)
+
+    def _show_raw_rows(self, table, raw_map, source_label):
+        """פותח RawRowsDialog עם השורות המקוריות של הרשומה הנבחרת."""
+        if not isinstance(table, QTableWidget):
+            return
+        row = table.currentRow()
+        if row < 0 or row >= len(raw_map):
+            return
+        raw_records = raw_map[row]
+        supplier_name = self.supplier_stats.get("supplier_name", "")
+        title = f"שורות מקור ({source_label}) – {supplier_name}"
+        dialog = RawRowsDialog(raw_records, title, self)
+        dialog.exec()
 
     def _record_display_text(self, record, source_label):
         if not record:
@@ -743,6 +901,9 @@ def load_gilboa(file_path):
     df["match_auth"] = df["ref"].apply(clean_auth)
     df["source_supplier"] = "גלבוע"
 
+    # שמור עותק של הנתונים לפני קיבוץ (לצורך drill-down)
+    df_raw = df.copy()
+
     # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
     group_keys = ["match_card", "match_auth", "source_supplier"]
     if "Doc number" in df.columns:
@@ -759,7 +920,7 @@ def load_gilboa(file_path):
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
-    return df
+    return df, df_raw
 
 
 def load_agency(file_path):
@@ -816,6 +977,9 @@ def load_agency(file_path):
     df["match_auth"] = df["מספר אישור"].apply(clean_auth)
     df["source_supplier"] = "אייגנסי"
 
+    # שמור עותק של הנתונים לפני קיבוץ (לצורך drill-down)
+    df_raw = df.copy()
+
     # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
     group_keys = ["match_card", "match_pnr", "match_auth", "source_supplier"]
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
@@ -830,7 +994,7 @@ def load_agency(file_path):
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
-    return df
+    return df, df_raw
 
 
 def load_odyssey(file_path):
@@ -863,6 +1027,9 @@ def load_odyssey(file_path):
     df["match_auth"] = ""
     df["source_supplier"] = "אודיסאה"
 
+    # שמור עותק של הנתונים לפני קיבוץ (לצורך drill-down)
+    df_raw = df.copy()
+
     # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים (ללא match_auth שתמיד ריק)
     group_keys = ["match_card", "match_pnr", "source_supplier"]
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
@@ -877,7 +1044,7 @@ def load_odyssey(file_path):
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
-    return df
+    return df, df_raw
 
 
 def load_booster(file_path):
@@ -897,6 +1064,9 @@ def load_booster(file_path):
     df["match_auth"] = df["Description"].apply(clean_auth)
     df["source_supplier"] = "בוסטר"
 
+    # שמור עותק של הנתונים לפני קיבוץ (לצורך drill-down)
+    df_raw = df.copy()
+
     # קיבוץ לפי כל פרמטרי ההתאמה, סיכום סכומים
     group_keys = ["match_card", "match_pnr", "match_auth", "source_supplier"]
     if "Document No." in df.columns:
@@ -913,7 +1083,7 @@ def load_booster(file_path):
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
-    return df
+    return df, df_raw
 
 
 # =====================================================================
@@ -984,6 +1154,9 @@ def load_credit_2000(file_path):
 
     df["match_pnr"] = df.apply(extract_credit_pnr, axis=1)
 
+    # שמור עותק של הנתונים לפני קיבוץ (לצורך drill-down)
+    df_raw = df.copy()
+
     # ─── קיבוץ לפי מפתחות ההתאמה, סיכום סכומים ─────────────────────────────────────
     # קיבוץ מתבצע אחרי השינוי של הסכום בזיכויים ובטור "מספר אישור"
     group_keys = ["match_card", "match_pnr", "match_auth", "ספק_משויך"]
@@ -999,7 +1172,7 @@ def load_credit_2000(file_path):
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
-    return df
+    return df, df_raw
 
 
 # =====================================================================
@@ -1057,22 +1230,31 @@ def run_reconciliation(
     log("תיקיית הפלט מוכנה.")
 
     log("טוען קובץ קרדיט 2000...")
-    df_credit = load_credit_2000(credit_file)
+    df_credit, df_raw_credit = load_credit_2000(credit_file)
     log(f"נטענו {len(df_credit)} רשומות מקרדיט 2000.")
 
     suppliers_dfs = []
+    df_raw_suppliers_dict = {}
     if gilboa_file:
         log("טוען קובץ ספק: גלבוע...")
-        suppliers_dfs.append(load_gilboa(gilboa_file))
+        _df, _df_raw = load_gilboa(gilboa_file)
+        suppliers_dfs.append(_df)
+        df_raw_suppliers_dict["גלבוע"] = _df_raw
     if agency_file:
         log("טוען קובץ ספק: אייגנסי...")
-        suppliers_dfs.append(load_agency(agency_file))
+        _df, _df_raw = load_agency(agency_file)
+        suppliers_dfs.append(_df)
+        df_raw_suppliers_dict["אייגנסי"] = _df_raw
     if odyssey_file:
         log("טוען קובץ ספק: אודיסאה...")
-        suppliers_dfs.append(load_odyssey(odyssey_file))
+        _df, _df_raw = load_odyssey(odyssey_file)
+        suppliers_dfs.append(_df)
+        df_raw_suppliers_dict["אודיסאה"] = _df_raw
     if booster_file:
         log("טוען קובץ ספק: בוסטר...")
-        suppliers_dfs.append(load_booster(booster_file))
+        _df, _df_raw = load_booster(booster_file)
+        suppliers_dfs.append(_df)
+        df_raw_suppliers_dict["בוסטר"] = _df_raw
 
     if not suppliers_dfs:
         raise ValueError("לא נבחרו קבצי ספקים תקינים לעיבוד.")
@@ -1242,12 +1424,42 @@ def run_reconciliation(
         df_only_in_credit_clean = df_only_in_credit[credit_display_cols].copy()
     else:
         df_only_in_credit_clean = df_only_in_credit.copy()
-    
-    df_only_in_credit_clean.to_excel(path_credit, index=False)
+
+    # חישוב נתוני raw לפני פתיחת ExcelWriter
+    raw_map_credit = _build_raw_records_map(df_only_in_credit, df_raw_credit, CREDIT_GROUP_KEYS)
+    raw_rows_credit = []
+    for group_idx, raw_rows_c in enumerate(raw_map_credit, start=1):
+        for raw_row in raw_rows_c:
+            raw_rows_credit.append({"קבוצת_חריג": group_idx, **raw_row})
+
+    with pd.ExcelWriter(path_credit, engine="openpyxl") as writer:
+        df_only_in_credit_clean.to_excel(writer, sheet_name="חריגים_קרדיט", index=False)
+        # גיליון פירוט שורות מקוריות
+        if raw_rows_credit:
+            try:
+                pd.DataFrame(raw_rows_credit).to_excel(writer, sheet_name="פירוט_מקורי", index=False)
+            except Exception as _raw_exc:
+                log(f"אזהרה: לא ניתן לכתוב גיליון פירוט מקורי לקרדיט: {_raw_exc}")
 
     # --- יצירת קובץ 3: רק בדוחות הספקים ---
     # הצג את העמודות המקוריות של כל ספק
     
+    # חישוב נתוני raw ספקים לפני פתיחת ExcelWriter
+    raw_rows_per_supplier = {}
+    for _sup_key in supplier_cols_dict:
+        _df_sup_for_map = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == _sup_key]
+        if not _df_sup_for_map.empty:
+            _raw_map = _build_raw_records_map(
+                _df_sup_for_map,
+                df_raw_suppliers_dict.get(_sup_key),
+                SUPPLIER_GROUP_KEYS.get(_sup_key, []),
+            )
+            _rows = []
+            for _gidx, _raw_rows in enumerate(_raw_map, start=1):
+                for _rr in _raw_rows:
+                    _rows.append({"קבוצת_חריג": _gidx, **_rr})
+            raw_rows_per_supplier[_sup_key] = _rows
+
     with pd.ExcelWriter(path_suppliers, engine="openpyxl") as writer:
         has_sheets_sup = False
         for supplier, sup_cols in supplier_cols_dict.items():
@@ -1258,7 +1470,14 @@ def run_reconciliation(
                 if available_cols:
                     df_sup_missing[available_cols].to_excel(writer, sheet_name=supplier, index=False)
                     has_sheets_sup = True
-        
+                # גיליון פירוט שורות מקוריות לכל ספק
+                raw_rows_sup = raw_rows_per_supplier.get(supplier, [])
+                if raw_rows_sup:
+                    sheet_raw = f"{supplier}_מקורי"[:31]
+                    try:
+                        pd.DataFrame(raw_rows_sup).to_excel(writer, sheet_name=sheet_raw, index=False)
+                    except Exception as _raw_exc:
+                        log(f"אזהרה: לא ניתן לכתוב גיליון פירוט מקורי ל-{supplier}: {_raw_exc}")
         if not has_sheets_sup:
             pd.DataFrame(columns=["אין נתונים"]).to_excel(writer, sheet_name="אין נתונים", index=False)
 
@@ -1269,6 +1488,8 @@ def run_reconciliation(
         df_only_in_credit=df_only_in_credit,
         df_only_in_suppliers=df_only_in_suppliers,
         supplier_cols_dict=supplier_cols_dict,
+        df_raw_credit=df_raw_credit,
+        df_raw_suppliers_dict=df_raw_suppliers_dict,
     )
 
     log("כתיבת קבצי הפלט הושלמה בהצלחה.")
