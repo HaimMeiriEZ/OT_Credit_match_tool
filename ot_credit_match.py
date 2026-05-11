@@ -750,8 +750,12 @@ def load_gilboa(file_path):
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
     df_to_group = df[mask].copy()
     df_no_group = df[~mask].copy()
-    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    
+    # סכום match_amount ו-origin amount
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col not in ["match_amount", "origin amount"]}
     agg_dict["match_amount"] = "sum"
+    agg_dict["origin amount"] = lambda x: str(sum(float(str(val).replace(",", "").strip()) for val in x if pd.notna(val)))
+    
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
@@ -817,8 +821,12 @@ def load_agency(file_path):
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
     df_to_group = df[mask].copy()
     df_no_group = df[~mask].copy()
-    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    
+    # סכום match_amount ו-סכום מטבע ראשי
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col not in ["match_amount", "סכום מטבע ראשי"]}
     agg_dict["match_amount"] = "sum"
+    agg_dict["סכום מטבע ראשי"] = lambda x: str(sum(float(str(val).replace(",", "").strip()) for val in x if pd.notna(val)))
+    
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
@@ -860,8 +868,12 @@ def load_odyssey(file_path):
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
     df_to_group = df[mask].copy()
     df_no_group = df[~mask].copy()
-    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    
+    # סכום match_amount ו-Amount
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col not in ["match_amount", "Amount"]}
     agg_dict["match_amount"] = "sum"
+    agg_dict["Amount"] = lambda x: str(sum(float(str(val).replace(",", "").strip()) for val in x if pd.notna(val)))
+    
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
@@ -892,8 +904,12 @@ def load_booster(file_path):
     mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
     df_to_group = df[mask].copy()
     df_no_group = df[~mask].copy()
-    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col != "match_amount"}
+    
+    # סכום match_amount ו-Amount
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col not in ["match_amount", "Amount"]}
     agg_dict["match_amount"] = "sum"
+    agg_dict["Amount"] = lambda x: str(sum(float(str(val).replace(",", "").strip()) for val in x if pd.notna(val)))
+    
     df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
     df = pd.concat([df_grouped, df_no_group], ignore_index=True)
 
@@ -937,6 +953,17 @@ def load_credit_2000(file_path):
     df["ספק_משויך"] = df.apply(classify_supplier, axis=1)
     df = df[df["ספק_משויך"] != "לא מזוהה"]
 
+    # ─── הכפלה בשיטות -1 כאשר "אשראי" הוא "זיכוי" ───────────────────────────────
+    # זה מתבצע לפני הקיבוץ וההתאמה בפועל
+    if "אשראי" in df.columns:
+        credit_mask = df["אשראי"].astype(str).str.strip() == "זיכוי"
+        df.loc[credit_mask, "סכום"] = (
+            df.loc[credit_mask, "סכום"]
+            .astype(str)
+            .apply(lambda x: clean_amount(x) * -1)
+            .astype(str)
+        )
+
     df["match_card"] = df["טוקן"].apply(clean_card)
     df["match_amount"] = df["סכום"].apply(clean_amount)
 
@@ -956,6 +983,22 @@ def load_credit_2000(file_path):
         return pnr_clean[-6:] if len(pnr_clean) >= 6 else pnr_clean
 
     df["match_pnr"] = df.apply(extract_credit_pnr, axis=1)
+
+    # ─── קיבוץ לפי מפתחות ההתאמה, סיכום סכומים ─────────────────────────────────────
+    # קיבוץ מתבצע אחרי השינוי של הסכום בזיכויים ובטור "מספר אישור"
+    group_keys = ["match_card", "match_pnr", "match_auth", "ספק_משויך"]
+    mask = df[group_keys].apply(lambda col: col.astype(str).str.strip() != "").all(axis=1)
+    df_to_group = df[mask].copy()
+    df_no_group = df[~mask].copy()
+    
+    # צור aggregation dictionary: "first" לרוב העמודות, "sum" לסכומים
+    agg_dict = {col: "first" for col in df.columns if col not in group_keys and col not in ["match_amount", "סכום"]}
+    agg_dict["match_amount"] = "sum"  # סכום match_amount (numeric)
+    agg_dict["סכום"] = lambda x: str(sum(float(str(val).replace(",", "").strip()) for val in x if pd.notna(val)))  # סכום סכומים וחזור לstring
+    
+    df_grouped = df_to_group.groupby(group_keys, as_index=False).agg(agg_dict)
+    df = pd.concat([df_grouped, df_no_group], ignore_index=True)
+
     return df
 
 
@@ -1101,55 +1144,121 @@ def run_reconciliation(
     path_log = os.path.join(output_folder, "LOGER.log")
 
     # --- יצירת קובץ 1: התאמה מלאה ---
+    # שדות ממקור: קרדיט (_x) וספק (_y)
+    
     with pd.ExcelWriter(path_matched, engine="openpyxl") as writer:
         has_sheets = False
         for supplier, sup_cols in supplier_cols_dict.items():
             df_sup_matched = matched_all[matched_all["ספק_משויך"] == supplier].copy()
             if not df_sup_matched.empty:
-                rename_map = {}
-                for c in credit_cols:
-                    if c in df_sup_matched.columns:
-                        rename_map[c] = f"{c} - קרדיט"
-                    elif f"{c}_x" in df_sup_matched.columns:
-                        rename_map[f"{c}_x"] = f"{c} - קרדיט"
-                    elif f"{c}_y" in df_sup_matched.columns:
-                        rename_map[f"{c}_y"] = f"{c} - קרדיט"
-
-                for c in sup_cols:
-                    if c in df_sup_matched.columns:
-                        rename_map[c] = f"{c} - {supplier}"
-                    elif f"{c}_y" in df_sup_matched.columns:
-                        rename_map[f"{c}_y"] = f"{c} - {supplier}"
-                    elif f"{c}_x" in df_sup_matched.columns:
-                        rename_map[f"{c}_x"] = f"{c} - {supplier}"
-
-                df_sup_matched.rename(columns=rename_map, inplace=True)
-
-                current_credit_cols = [f"{c} - קרדיט" for c in credit_cols if f"{c} - קרדיט" in df_sup_matched.columns]
-                current_sup_cols = [f"{c} - {supplier}" for c in sup_cols if f"{c} - {supplier}" in df_sup_matched.columns]
-
-                final_cols = current_credit_cols + current_sup_cols
-                df_sup_matched[final_cols].to_excel(writer, sheet_name=supplier, index=False)
-                has_sheets = True
+                output_cols = []
+                
+                # ============================================================
+                # עמודות מקרדיט (עם סיפא _x) - המקור המקורי
+                # ============================================================
+                
+                # מספר אישור - קרדיט
+                if "מספר אישור_x" in df_sup_matched.columns:
+                    df_sup_matched["מספר אישור - קרדיט"] = df_sup_matched["מספר אישור_x"]
+                    output_cols.append("מספר אישור - קרדיט")
+                
+                # טוקן - קרדיט (עם 4 ספרות אחרונות)
+                if "טוקן_x" in df_sup_matched.columns:
+                    df_sup_matched["טוקן - קרדיט (4 ספרות)"] = df_sup_matched["טוקן_x"].astype(str).str[-4:]
+                    output_cols.append("טוקן - קרדיט (4 ספרות)")
+                
+                # מספר הזמנה - קרדיט (עם 6 ספרות אחרונות)
+                if "מספר הזמנה_x" in df_sup_matched.columns:
+                    df_sup_matched["מספר הזמנה - קרדיט (6 ספרות)"] = df_sup_matched["מספר הזמנה_x"].astype(str).str[-6:]
+                    output_cols.append("מספר הזמנה - קרדיט (6 ספרות)")
+                
+                # סכום - קרדיט
+                if "סכום_x" in df_sup_matched.columns:
+                    df_sup_matched["סכום - קרדיט"] = df_sup_matched["סכום_x"]
+                    output_cols.append("סכום - קרדיט")
+                
+                # ============================================================
+                # עמודות מספק (עם סיפא _y) - המקור המקורי
+                # ============================================================
+                
+                for col in sup_cols:
+                    if f"{col}_y" in df_sup_matched.columns:
+                        df_sup_matched[f"{col} - {supplier}"] = df_sup_matched[f"{col}_y"]
+                        output_cols.append(f"{col} - {supplier}")
+                
+                # ============================================================
+                # חישוב הפרש: סכום קרדיט - סכום ספק
+                # ============================================================
+                
+                # מצא את עמודת הסכום של הספק
+                supplier_amount_col = None
+                if "Amount" in sup_cols and "Amount_y" in df_sup_matched.columns:
+                    supplier_amount_col = "Amount_y"
+                elif "סכום מטבע ראשי_y" in df_sup_matched.columns:
+                    supplier_amount_col = "סכום מטבע ראשי_y"
+                elif "origin amount_y" in df_sup_matched.columns:
+                    supplier_amount_col = "origin amount_y"
+                
+                if supplier_amount_col and "סכום_x" in df_sup_matched.columns:
+                    df_sup_matched["הפרש"] = (
+                        pd.to_numeric(df_sup_matched["סכום_x"], errors='coerce') - 
+                        pd.to_numeric(df_sup_matched[supplier_amount_col], errors='coerce')
+                    )
+                    output_cols.append("הפרש")
+                
+                # כתוב לאקסל
+                if output_cols:
+                    df_sup_matched[output_cols].to_excel(writer, sheet_name=supplier, index=False)
+                    has_sheets = True
         
         if not has_sheets:
-            pd.DataFrame(columns=[f"{c} - קרדיט" for c in credit_cols]).to_excel(writer, sheet_name="אין נתונים", index=False)
+            pd.DataFrame(columns=["אין נתונים"]).to_excel(writer, sheet_name="אין נתונים", index=False)
 
     # --- יצירת קובץ 2: רק בקרדיט 2000 ---
-    df_only_in_credit_clean = df_only_in_credit[credit_cols].copy()
+    # הצג את העמודות המקוריות של קרדיט (ללא סיפא _x כי זה לא merge result)
+    credit_display_cols = []
+    
+    # מספר אישור
+    if "מספר אישור" in df_only_in_credit.columns:
+        df_only_in_credit["מספר אישור"] = df_only_in_credit["מספר אישור"]
+        credit_display_cols.append("מספר אישור")
+    
+    # טוקן (עם 4 ספרות אחרונות)
+    if "טוקן" in df_only_in_credit.columns:
+        df_only_in_credit["טוקן (4 ספרות)"] = df_only_in_credit["טוקן"].astype(str).str[-4:]
+        credit_display_cols.append("טוקן (4 ספרות)")
+    
+    # מספר הזמנה (עם 6 ספרות אחרונות)
+    if "מספר הזמנה" in df_only_in_credit.columns:
+        df_only_in_credit["מספר הזמנה (6 ספרות)"] = df_only_in_credit["מספר הזמנה"].astype(str).str[-6:]
+        credit_display_cols.append("מספר הזמנה (6 ספרות)")
+    
+    # סכום
+    if "סכום" in df_only_in_credit.columns:
+        df_only_in_credit["סכום"] = df_only_in_credit["סכום"]
+        credit_display_cols.append("סכום")
+    
+    if credit_display_cols:
+        df_only_in_credit_clean = df_only_in_credit[credit_display_cols].copy()
+    else:
+        df_only_in_credit_clean = df_only_in_credit.copy()
+    
     df_only_in_credit_clean.to_excel(path_credit, index=False)
 
     # --- יצירת קובץ 3: רק בדוחות הספקים ---
+    # הצג את העמודות המקוריות של כל ספק
+    
     with pd.ExcelWriter(path_suppliers, engine="openpyxl") as writer:
         has_sheets_sup = False
         for supplier, sup_cols in supplier_cols_dict.items():
             df_sup_missing = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == supplier].copy()
             if not df_sup_missing.empty:
-                current_sup_cols = [c for c in sup_cols if c in df_sup_missing.columns]
-                if current_sup_cols:
-                    df_sup_missing[current_sup_cols].to_excel(writer, sheet_name=supplier, index=False)
+                # בחר את העמודות המקוריות של הספק
+                available_cols = [col for col in sup_cols if col in df_sup_missing.columns]
+                if available_cols:
+                    df_sup_missing[available_cols].to_excel(writer, sheet_name=supplier, index=False)
                     has_sheets_sup = True
-                    
+        
         if not has_sheets_sup:
             pd.DataFrame(columns=["אין נתונים"]).to_excel(writer, sheet_name="אין נתונים", index=False)
 
