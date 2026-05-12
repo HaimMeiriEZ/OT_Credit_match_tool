@@ -492,6 +492,18 @@ class RawRowsDialog(QDialog):
             QMessageBox.critical(self, "שגיאה", f"שגיאה בייצוא:\n{exc}")
 
 
+class _NumericSortItem(QTableWidgetItem):
+    """QTableWidgetItem שממיין לפי ערך מספרי כאשר אפשר."""
+    def __lt__(self, other):
+        try:
+            return (
+                float(str(self.text()).replace(",", "").strip())
+                < float(str(other.text()).replace(",", "").strip())
+            )
+        except (ValueError, AttributeError):
+            return self.text() < other.text()
+
+
 class SupplierExceptionsDialog(QDialog):
     def __init__(self, supplier_stats, parent=None):
         super().__init__(parent)
