@@ -150,7 +150,12 @@ def compute_supplier_dashboard_data(
     for supplier_key, supplier_label in supplier_map.items():
         matched_supplier = matched_all[matched_all["ספק_משויך"] == supplier_key]
         credit_only_supplier = df_only_in_credit[df_only_in_credit["ספק_משויך"] == supplier_key]
-        supplier_only_rows = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == supplier_key]
+        _sup_rows = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == supplier_key]
+        # מיון פעם אחת – כך הטבלה ומפת raw rows יהיו באותו סדר שורות בדיוק
+        if "match_amount" in _sup_rows.columns:
+            supplier_only_rows = _sup_rows.sort_values("match_amount", ascending=False)
+        else:
+            supplier_only_rows = _sup_rows
 
         credit_exception_cols = [
             c for c in ["מסוף", "טוקן", "מספר אישור", "סכום", "מספר הזמנה"]
@@ -199,9 +204,11 @@ def compute_supplier_dashboard_data(
                     else []
                 ),
                 "supplier_exception_records": (
-                    supplier_only_rows[supplier_exception_cols].fillna("").to_dict("records")
-                    if supplier_exception_cols
-                    else []
+                    supplier_only_rows[supplier_exception_cols]
+                    .fillna("")
+                    .rename(columns={"match_amount": "סכום מקובץ"})
+                    .to_dict("records")
+                    if supplier_exception_cols else []
                 ),
                 "credit_exception_raw_records_map": (
                     _build_raw_records_map(credit_only_supplier, df_raw_credit, CREDIT_GROUP_KEYS)
@@ -643,6 +650,7 @@ class SupplierExceptionsDialog(QDialog):
     def _extract_amount(self, record):
         amount_candidates = [
             "סכום",
+            "סכום מקובץ",
             "match_amount",
             "origin amount",
             "charge amount",
@@ -1314,10 +1322,10 @@ def run_reconciliation(
             df_credit[col] = ""
 
     supplier_cols_dict = {
-        "בוסטר": ["Payment Method", "Amount", "Credit Account Name", "Description"],
-        "אייגנסי": ["4 ספרות אחרונות", "סכום מטבע ראשי", "מס' תיק", "מספר אישור"],
-        "אודיסאה": ["Card", "Amount", "Pnr"],
-        "גלבוע": ["Details", "origin amount", "ref"]
+        "בוסטר": ["Payment Method", "match_amount", "Credit Account Name", "Description"],
+        "אייגנסי": ["4 ספרות אחרונות", "match_amount", "מס' תיק", "מספר אישור"],
+        "אודיסאה": ["Card", "match_amount", "Pnr"],
+        "גלבוע": ["Details", "match_amount", "ref"]
     }
 
     path_matched = os.path.join(output_folder, "1_התאמה_מלאה.xlsx")
@@ -1468,7 +1476,11 @@ def run_reconciliation(
                 # בחר את העמודות המקוריות של הספק
                 available_cols = [col for col in sup_cols if col in df_sup_missing.columns]
                 if available_cols:
-                    df_sup_missing[available_cols].to_excel(writer, sheet_name=supplier, index=False)
+                    _df_sup_out = df_sup_missing[available_cols].copy()
+                    if "match_amount" in _df_sup_out.columns:
+                        _df_sup_out = _df_sup_out.sort_values("match_amount", ascending=False)
+                        _df_sup_out = _df_sup_out.rename(columns={"match_amount": "סכום מקובץ"})
+                    _df_sup_out.to_excel(writer, sheet_name=supplier, index=False)
                     has_sheets_sup = True
                 # גיליון פירוט שורות מקוריות לכל ספק
                 raw_rows_sup = raw_rows_per_supplier.get(supplier, [])
