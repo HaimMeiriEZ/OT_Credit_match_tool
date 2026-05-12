@@ -599,7 +599,7 @@ class SupplierExceptionsDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         table.setFont(QFont("Arial", 10))
-        table.setSortingEnabled(True)
+        table.setSortingEnabled(False)  # חייב להיות כבוי בזמן המילוי – Qt ממיין את שורות המודל אחרי setItem וגורם לתאים להיכנס לשורות הלא-נכונות
 
         for row_idx, record in enumerate(records):
             for col_idx, header in enumerate(display_headers):
@@ -609,6 +609,7 @@ class SupplierExceptionsDialog(QDialog):
                     item.setData(Qt.ItemDataRole.UserRole, record)
                 table.setItem(row_idx, col_idx, item)
 
+        table.setSortingEnabled(True)  # הפעל מיון רק לאחר סיום מילוי כל הנתונים
         return table
 
     def _wire_selection_handlers(self):
