@@ -149,11 +149,20 @@ def compute_supplier_dashboard_data(
 
     for supplier_key, supplier_label in supplier_map.items():
         matched_supplier = matched_all[matched_all["ספק_משויך"] == supplier_key]
-        credit_only_supplier = df_only_in_credit[df_only_in_credit["ספק_משויך"] == supplier_key]
+
+        # מיון קרדיט לפי ערך מוחלט יורד – חריגים גדולים קודם (כולל שליליים)
+        _credit_rows = df_only_in_credit[df_only_in_credit["ספק_משויך"] == supplier_key]
+        if "match_amount" in _credit_rows.columns and not _credit_rows.empty:
+            _cr_abs = pd.to_numeric(_credit_rows["match_amount"], errors="coerce").abs().fillna(0)
+            credit_only_supplier = _credit_rows.iloc[_cr_abs.values.argsort()[::-1]]
+        else:
+            credit_only_supplier = _credit_rows
+
+        # מיון ספק לפי ערך מוחלט יורד – הסיכון הכספי הגדול ביותר קודם (כולל שליליים)
         _sup_rows = df_only_in_suppliers[df_only_in_suppliers["source_supplier"] == supplier_key]
-        # מיון פעם אחת – כך הטבלה ומפת raw rows יהיו באותו סדר שורות בדיוק
-        if "match_amount" in _sup_rows.columns:
-            supplier_only_rows = _sup_rows.sort_values("match_amount", ascending=False)
+        if "match_amount" in _sup_rows.columns and not _sup_rows.empty:
+            _sup_abs = pd.to_numeric(_sup_rows["match_amount"], errors="coerce").abs().fillna(0)
+            supplier_only_rows = _sup_rows.iloc[_sup_abs.values.argsort()[::-1]]
         else:
             supplier_only_rows = _sup_rows
 
@@ -182,6 +191,36 @@ def compute_supplier_dashboard_data(
         denominator = matched_count + credit_only_count
         match_rate = (matched_count / denominator * 100) if denominator else 0.0
 
+        # בניית רשומות חריג עם שורות מקור מוטמעות (_raw_records)
+        _credit_raw_map = (
+            _build_raw_records_map(credit_only_supplier, df_raw_credit, CREDIT_GROUP_KEYS)
+            if df_raw_credit is not None else []
+        )
+        _credit_exc_recs = (
+            credit_only_supplier[credit_exception_cols].fillna("").to_dict("records")
+            if credit_exception_cols else []
+        )
+        for _i, _rec in enumerate(_credit_exc_recs):
+            _rec["_raw_records"] = _credit_raw_map[_i] if _i < len(_credit_raw_map) else []
+
+        _sup_raw_map = (
+            _build_raw_records_map(
+                supplier_only_rows,
+                (df_raw_suppliers_dict or {}).get(supplier_key),
+                SUPPLIER_GROUP_KEYS.get(supplier_key, []),
+            )
+            if df_raw_suppliers_dict is not None else []
+        )
+        _sup_exc_recs = (
+            supplier_only_rows[supplier_exception_cols]
+            .fillna("")
+            .rename(columns={"match_amount": "סכום מקובץ"})
+            .to_dict("records")
+            if supplier_exception_cols else []
+        )
+        for _i, _rec in enumerate(_sup_exc_recs):
+            _rec["_raw_records"] = _sup_raw_map[_i] if _i < len(_sup_raw_map) else []
+
         suppliers.append(
             {
                 "supplier_key": supplier_key,
@@ -198,30 +237,8 @@ def compute_supplier_dashboard_data(
                 "matched_amount": matched_amount,
                 "credit_only_amount": credit_only_amount,
                 "supplier_only_amount": supplier_only_amount,
-                "credit_exception_records": (
-                    credit_only_supplier[credit_exception_cols].fillna("").to_dict("records")
-                    if credit_exception_cols
-                    else []
-                ),
-                "supplier_exception_records": (
-                    supplier_only_rows[supplier_exception_cols]
-                    .fillna("")
-                    .rename(columns={"match_amount": "סכום מקובץ"})
-                    .to_dict("records")
-                    if supplier_exception_cols else []
-                ),
-                "credit_exception_raw_records_map": (
-                    _build_raw_records_map(credit_only_supplier, df_raw_credit, CREDIT_GROUP_KEYS)
-                    if df_raw_credit is not None else []
-                ),
-                "supplier_exception_raw_records_map": (
-                    _build_raw_records_map(
-                        supplier_only_rows,
-                        (df_raw_suppliers_dict or {}).get(supplier_key),
-                        SUPPLIER_GROUP_KEYS.get(supplier_key, []),
-                    )
-                    if df_raw_suppliers_dict is not None else []
-                ),
+                "credit_exception_records": _credit_exc_recs,
+                "supplier_exception_records": _sup_exc_recs,
             }
         )
 
@@ -484,8 +501,6 @@ class SupplierExceptionsDialog(QDialog):
         self.resize(960, 608)
         self.credit_records = supplier_stats.get("credit_exception_records", [])
         self.supplier_records = supplier_stats.get("supplier_exception_records", [])
-        self.credit_raw_map = supplier_stats.get("credit_exception_raw_records_map", [])
-        self.supplier_raw_map = supplier_stats.get("supplier_exception_raw_records_map", [])
         self.credit_table = None
         self.supplier_table = None
 
@@ -554,17 +569,17 @@ class SupplierExceptionsDialog(QDialog):
         if not records:
             return make_rtl_label(empty_message)
 
-        headers = list(records[0].keys())
-        table = QTableWidget(len(records), len(headers))
-        table.setHorizontalHeaderLabels(headers)
+        # _raw_records הוא שדה פנימי – לא מוצג כעמודה
+        display_headers = [h for h in records[0].keys() if h != "_raw_records"]
+        table = QTableWidget(len(records), len(display_headers))
+        table.setHorizontalHeaderLabels(display_headers)
         enforce_rtl_header_alignment(table)
-        
-        # Center-align all column headers
+
         for col_idx in range(table.columnCount()):
             header_item = table.horizontalHeaderItem(col_idx)
             if header_item is not None:
                 header_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
-        
+
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -572,61 +587,58 @@ class SupplierExceptionsDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         table.setFont(QFont("Arial", 10))
+        table.setSortingEnabled(True)
 
-        for row_idx, row in enumerate(records):
-            for col_idx, header in enumerate(headers):
-                table.setItem(row_idx, col_idx, QTableWidgetItem(str(row.get(header, ""))))
+        for row_idx, record in enumerate(records):
+            for col_idx, header in enumerate(display_headers):
+                item = _NumericSortItem(str(record.get(header, "")))
+                if col_idx == 0:
+                    # שמור את כל הרשומה (כולל _raw_records) בתא השדה הראשון
+                    item.setData(Qt.ItemDataRole.UserRole, record)
+                table.setItem(row_idx, col_idx, item)
 
         return table
 
     def _wire_selection_handlers(self):
         if isinstance(self.credit_table, QTableWidget):
             self.credit_table.itemSelectionChanged.connect(
-                lambda: self._handle_table_selection(
-                    self.credit_table,
-                    self.credit_records,
-                    "חריג סולק",
-                )
+                lambda: self._handle_table_selection(self.credit_table, "חריג סולק")
             )
             self.credit_table.clicked.connect(
-                lambda: self._show_raw_rows(
-                    self.credit_table, self.credit_raw_map, "רק בקרדיט"
-                )
+                lambda: self._show_raw_rows(self.credit_table, "רק בקרדיט")
             )
 
         if isinstance(self.supplier_table, QTableWidget):
             self.supplier_table.itemSelectionChanged.connect(
-                lambda: self._handle_table_selection(
-                    self.supplier_table,
-                    self.supplier_records,
-                    "חריג ספק",
-                )
+                lambda: self._handle_table_selection(self.supplier_table, "חריג ספק")
             )
             self.supplier_table.clicked.connect(
-                lambda: self._show_raw_rows(
-                    self.supplier_table, self.supplier_raw_map, "רק בספק"
-                )
+                lambda: self._show_raw_rows(self.supplier_table, "רק בספק")
             )
 
-    def _handle_table_selection(self, table, records, source_label):
+    def _handle_table_selection(self, table, source_label):
         if not isinstance(table, QTableWidget):
             return
 
         row = table.currentRow()
-        if row < 0 or row >= len(records):
+        if row < 0:
             self._update_drilldown(None, "")
             return
 
-        self._update_drilldown(records[row], source_label)
+        item = table.item(row, 0)
+        record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        self._update_drilldown(record, source_label)
 
-    def _show_raw_rows(self, table, raw_map, source_label):
+    def _show_raw_rows(self, table, source_label):
         """פותח RawRowsDialog עם השורות המקוריות של הרשומה הנבחרת."""
         if not isinstance(table, QTableWidget):
             return
         row = table.currentRow()
-        if row < 0 or row >= len(raw_map):
+        if row < 0:
             return
-        raw_records = raw_map[row]
+        item = table.item(row, 0)
+        record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        raw_records = record.get("_raw_records", []) if isinstance(record, dict) else []
         supplier_name = self.supplier_stats.get("supplier_name", "")
         title = f"שורות מקור ({source_label}) – {supplier_name}"
         dialog = RawRowsDialog(raw_records, title, self)
@@ -707,8 +719,14 @@ class SupplierExceptionsDialog(QDialog):
             path += ".xlsx"
 
         try:
-            credit_df = pd.DataFrame(self.supplier_stats.get("credit_exception_records", []))
-            supplier_df = pd.DataFrame(self.supplier_stats.get("supplier_exception_records", []))
+            credit_df = pd.DataFrame([
+                {k: v for k, v in r.items() if k != "_raw_records"}
+                for r in self.supplier_stats.get("credit_exception_records", [])
+            ])
+            supplier_df = pd.DataFrame([
+                {k: v for k, v in r.items() if k != "_raw_records"}
+                for r in self.supplier_stats.get("supplier_exception_records", [])
+            ])
 
             with pd.ExcelWriter(path, engine="openpyxl") as writer:
                 if credit_df.empty:
