@@ -1,3 +1,7 @@
 ﻿__pycache__/
 *.pyc
 desktop.ini
+
+# ML runtime data (user labels + trained models) — נוצר אוטומטית, לא תלוי קוד
+ml_data/
+.venv/

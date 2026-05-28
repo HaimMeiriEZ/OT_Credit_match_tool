@@ -3,6 +3,14 @@ import re
 import sys
 from datetime import datetime
 import pandas as pd
+
+# שכבת ה-AI (XGBoost). נטענת ב-try כדי שהקובץ ירוץ גם אם החבילה חסרה.
+try:
+    import ml_engine
+    _ML_AVAILABLE = True
+except ImportError:
+    ml_engine = None
+    _ML_AVAILABLE = False
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -200,8 +208,22 @@ def compute_supplier_dashboard_data(
             credit_only_supplier[credit_exception_cols].fillna("").to_dict("records")
             if credit_exception_cols else []
         )
+        # הזרק שדות canonical (_match_*) לכל רשומה — נדרש ל-ML ולתיוג
+        _credit_canonical_rows = (
+            credit_only_supplier[["match_card", "match_pnr", "match_auth", "match_amount"]]
+            .reindex(columns=["match_card", "match_pnr", "match_auth", "match_amount"])
+            .fillna("")
+            .to_dict("records")
+            if not credit_only_supplier.empty else []
+        )
         for _i, _rec in enumerate(_credit_exc_recs):
             _rec["_raw_records"] = _credit_raw_map[_i] if _i < len(_credit_raw_map) else []
+            if _i < len(_credit_canonical_rows):
+                _canon = _credit_canonical_rows[_i]
+                _rec["_match_card"] = str(_canon.get("match_card", "") or "")
+                _rec["_match_pnr"] = str(_canon.get("match_pnr", "") or "")
+                _rec["_match_auth"] = str(_canon.get("match_auth", "") or "")
+                _rec["_match_amount"] = _canon.get("match_amount", 0)
 
         _sup_raw_map = (
             _build_raw_records_map(
@@ -218,8 +240,36 @@ def compute_supplier_dashboard_data(
             .to_dict("records")
             if supplier_exception_cols else []
         )
+        _sup_canonical_cols = [c for c in ["match_card", "match_pnr", "match_auth", "match_amount"] if c in supplier_only_rows.columns]
+        _sup_canonical_rows = (
+            supplier_only_rows[_sup_canonical_cols].fillna("").to_dict("records")
+            if not supplier_only_rows.empty and _sup_canonical_cols else []
+        )
         for _i, _rec in enumerate(_sup_exc_recs):
             _rec["_raw_records"] = _sup_raw_map[_i] if _i < len(_sup_raw_map) else []
+            if _i < len(_sup_canonical_rows):
+                _canon = _sup_canonical_rows[_i]
+                _rec["_match_card"] = str(_canon.get("match_card", "") or "")
+                _rec["_match_pnr"] = str(_canon.get("match_pnr", "") or "")
+                _rec["_match_auth"] = str(_canon.get("match_auth", "") or "")
+                _rec["_match_amount"] = _canon.get("match_amount", 0)
+
+        # הזרקת הצעות AI אם קיים מודל מאומן עבור הספק
+        _ai_meta = None
+        if _ML_AVAILABLE and _credit_exc_recs and _sup_exc_recs:
+            try:
+                _model = ml_engine.load_supplier_model(supplier_key)
+                if _model is not None:
+                    _suggestions = ml_engine.suggest_matches(
+                        _credit_exc_recs, _sup_exc_recs, _model, threshold=0.5,
+                    )
+                    for _i, _sug in enumerate(_suggestions):
+                        if _i < len(_credit_exc_recs):
+                            _credit_exc_recs[_i]["הצעת AI"] = _sug.get("matched_label", "") or ""
+                            _credit_exc_recs[_i]["score"] = round(float(_sug.get("score", 0.0)), 3)
+                    _ai_meta = ml_engine.get_model_meta(supplier_key) or {}
+            except Exception:
+                _ai_meta = None
 
         suppliers.append(
             {
@@ -239,6 +289,7 @@ def compute_supplier_dashboard_data(
                 "supplier_only_amount": supplier_only_amount,
                 "credit_exception_records": _credit_exc_recs,
                 "supplier_exception_records": _sup_exc_recs,
+                "ai_meta": _ai_meta,
             }
         )
 
@@ -526,6 +577,58 @@ class SupplierExceptionsDialog(QDialog):
         export_button.clicked.connect(self._export_exceptions_to_excel)
         main_layout.addWidget(export_button, alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignAbsolute)
 
+        # ===== AI Labeling Panel =====
+        self._selected_credit_record = None
+        self._selected_supplier_record = None
+        self._label_store = ml_engine.LabelStore() if _ML_AVAILABLE else None
+        self._labeled_pairs = set()  # מפתחות (credit_key, supplier_key_id) שכבר תויגו בסשן
+
+        ai_box = QFrame()
+        ai_box.setStyleSheet(
+            "QFrame { background-color: #fef7ec; border: 1px solid #f5c97a; border-radius: 8px; }"
+        )
+        ai_layout = QVBoxLayout(ai_box)
+        ai_layout.setContentsMargins(10, 8, 10, 8)
+        ai_title = make_rtl_label("🧠 תיוג AI — סמן זוגות לאימון המודל", bold=True)
+        ai_layout.addWidget(ai_title)
+
+        self._ai_selection_label = make_rtl_label("בחר רשומה מהטאב 'רק בקרדיט' ורשומה מהטאב 'רק בספק' כדי לסמן זוג.")
+        self._ai_selection_label.setStyleSheet("color: #6b4f1d; font-size: 10px;")
+        ai_layout.addWidget(self._ai_selection_label)
+
+        ai_buttons = QHBoxLayout()
+        self._btn_label_match = QPushButton("✅ סמן זוג נבחר כהתאמה")
+        self._btn_label_match.setStyleSheet(
+            "QPushButton { background-color: #d1fadf; color: #065f46; border: 1px solid #6ee7b7; border-radius: 4px; padding: 6px 12px; }"
+            "QPushButton:hover { background-color: #a7f3d0; }"
+            "QPushButton:disabled { background-color: #f0f0f0; color: #999; }"
+        )
+        self._btn_label_match.setEnabled(False)
+        self._btn_label_match.clicked.connect(lambda: self._label_selected_pair(1))
+
+        self._btn_label_reject = QPushButton("❌ סמן חריג נבחר כדחייה")
+        self._btn_label_reject.setStyleSheet(
+            "QPushButton { background-color: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; border-radius: 4px; padding: 6px 12px; }"
+            "QPushButton:hover { background-color: #fecaca; }"
+            "QPushButton:disabled { background-color: #f0f0f0; color: #999; }"
+        )
+        self._btn_label_reject.setEnabled(False)
+        self._btn_label_reject.clicked.connect(lambda: self._label_selected_pair(0))
+
+        ai_buttons.addWidget(self._btn_label_match)
+        ai_buttons.addWidget(self._btn_label_reject)
+        ai_buttons.addStretch()
+        ai_layout.addLayout(ai_buttons)
+
+        if not _ML_AVAILABLE:
+            ai_warn = make_rtl_label("⚠️ חבילת xgboost לא מותקנת — תיוג מושבת. הרץ: pip install xgboost scikit-learn")
+            ai_warn.setStyleSheet("color: #991b1b; font-size: 10px;")
+            ai_layout.addWidget(ai_warn)
+            self._btn_label_match.setEnabled(False)
+            self._btn_label_reject.setEnabled(False)
+
+        main_layout.addWidget(ai_box)
+
         tabs = QTabWidget()
         tabs.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         tabs.setStyleSheet(
@@ -581,8 +684,8 @@ class SupplierExceptionsDialog(QDialog):
         if not records:
             return make_rtl_label(empty_message)
 
-        # _raw_records הוא שדה פנימי – לא מוצג כעמודה
-        display_headers = [h for h in records[0].keys() if h != "_raw_records"]
+        # שדות פנימיים (החל ב-_) לא מוצגים כעמודות
+        display_headers = [h for h in records[0].keys() if not str(h).startswith("_")]
         table = QTableWidget(len(records), len(display_headers))
         table.setHorizontalHeaderLabels(display_headers)
         enforce_rtl_header_alignment(table)
@@ -641,6 +744,87 @@ class SupplierExceptionsDialog(QDialog):
         item = table.item(row, 0)
         record = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         self._update_drilldown(record, source_label)
+
+        # מעקב בחירה לתיוג AI
+        if table is self.credit_table:
+            self._selected_credit_record = record
+        elif table is self.supplier_table:
+            self._selected_supplier_record = record
+        self._refresh_label_buttons()
+
+    def _refresh_label_buttons(self):
+        if not _ML_AVAILABLE:
+            return
+        has_credit = self._selected_credit_record is not None
+        has_supplier = self._selected_supplier_record is not None
+        # התאמה — דורש שני צדדים
+        self._btn_label_match.setEnabled(has_credit and has_supplier)
+        # דחיה — מספיק צד אחד (חריג בלתי-תקף עצמאי)
+        self._btn_label_reject.setEnabled(has_credit or has_supplier)
+
+        parts = []
+        if has_credit:
+            c = self._selected_credit_record
+            parts.append(
+                f"קרדיט: כרטיס={c.get('_match_card', '')} | "
+                f"PNR={c.get('_match_pnr', '')} | אישור={c.get('_match_auth', '')} | "
+                f"סכום={c.get('_match_amount', '')}"
+            )
+        if has_supplier:
+            s = self._selected_supplier_record
+            parts.append(
+                f"ספק: כרטיס={s.get('_match_card', '')} | "
+                f"PNR={s.get('_match_pnr', '')} | אישור={s.get('_match_auth', '')} | "
+                f"סכום={s.get('_match_amount', '')}"
+            )
+        if parts:
+            self._ai_selection_label.setText(" || ".join(parts))
+        else:
+            self._ai_selection_label.setText(
+                "בחר רשומה מהטאב 'רק בקרדיט' ורשומה מהטאב 'רק בספק' כדי לסמן זוג."
+            )
+
+    def _label_selected_pair(self, label_value):
+        """שומר תיוג ב-LabelStore. label=1 התאמה, label=0 דחיה."""
+        if not _ML_AVAILABLE or self._label_store is None:
+            return
+        supplier_key = self.supplier_stats.get("supplier_key", "")
+        credit = self._selected_credit_record
+        supplier = self._selected_supplier_record
+
+        # אם label=0 ואין שני צדדים, נשמור תיוג שלילי על הצד שכן נבחר
+        if label_value == 1 and (credit is None or supplier is None):
+            QMessageBox.warning(self, "חסר זוג", "בחר רשומה משני הצדדים כדי לסמן התאמה.")
+            return
+        if label_value == 0 and credit is None and supplier is None:
+            return
+
+        try:
+            # סנן שדות _raw_records לפני שמירה (גדולים מדי)
+            credit_clean = {k: v for k, v in (credit or {}).items() if k != "_raw_records"} if credit else None
+            supplier_clean = {k: v for k, v in (supplier or {}).items() if k != "_raw_records"} if supplier else None
+            self._label_store.add_label(
+                supplier_key=supplier_key,
+                credit_row=credit_clean or {},
+                supplier_row=supplier_clean,
+                label=label_value,
+            )
+            total = self._label_store.count_total()
+            sup_count = len(self._label_store.labels_for_supplier(supplier_key))
+            msg = f"נשמר! סה\"כ תיוגים לספק {supplier_key}: {sup_count} (כללי: {total})"
+            self._ai_selection_label.setText(msg)
+
+            # רמז על איזון — אחרי N חיוביים ברצף, הצע גם דחיות
+            streak = self._label_store.positive_streak()
+            if label_value == 1 and streak >= ml_engine.POSITIVE_STREAK_THRESHOLD:
+                QMessageBox.information(
+                    self,
+                    "אנא סמן גם דחיות",
+                    f"סימנת {streak} התאמות ברצף ללא דחיות.\n"
+                    "כדי שהמודל ילמד גם מה לא להתאים — אנא סמן 2-3 חריגים שאינם מתאימים (כדחיה).",
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "שגיאה", f"שמירת תיוג נכשלה:\n{exc}")
 
     def _show_raw_rows(self, table, source_label):
         """פותח RawRowsDialog עם השורות המקוריות של הרשומה הנבחרת."""
@@ -733,11 +917,11 @@ class SupplierExceptionsDialog(QDialog):
 
         try:
             credit_df = pd.DataFrame([
-                {k: v for k, v in r.items() if k != "_raw_records"}
+                {k: v for k, v in r.items() if not str(k).startswith("_")}
                 for r in self.supplier_stats.get("credit_exception_records", [])
             ])
             supplier_df = pd.DataFrame([
-                {k: v for k, v in r.items() if k != "_raw_records"}
+                {k: v for k, v in r.items() if not str(k).startswith("_")}
                 for r in self.supplier_stats.get("supplier_exception_records", [])
             ])
 
@@ -807,8 +991,8 @@ class SupplierReconciliationDashboard(QWidget):
         cards_layout.addWidget(self._make_kpi_card("הפרש לטיפול", format_currency(kpis["discrepancy"]), discrepancy_color))
         layout.addLayout(cards_layout)
 
-        table = QTableWidget(len(self.dashboard_data["suppliers"]), 6)
-        table.setHorizontalHeaderLabels(["שם הספק", "דיווח סולק", "דיווח ספק", "הפרש", "סטטוס", "פעולה"])
+        table = QTableWidget(len(self.dashboard_data["suppliers"]), 7)
+        table.setHorizontalHeaderLabels(["שם הספק", "דיווח סולק", "דיווח ספק", "הפרש", "סטטוס", "מודל AI", "פעולה"])
         enforce_rtl_header_alignment(table)
         table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
         for col_idx in range(table.columnCount()):
@@ -842,6 +1026,20 @@ class SupplierReconciliationDashboard(QWidget):
             status_text = f"{supplier_stats['status_icon']} {supplier_stats['matched_count']} התאמות"
             table.setItem(row_idx, 4, QTableWidgetItem(status_text))
 
+            # עמודת מודל AI — כפתור אימון עם סטטוס מודל בטקסט
+            train_btn = QPushButton(self._ai_status_text(supplier_stats))
+            train_btn.setStyleSheet(
+                "QPushButton { background-color: #fef7ec; color: #6b4f1d; border: 1px solid #f5c97a; border-radius: 4px; padding: 4px 8px; }"
+                "QPushButton:hover { background-color: #fde9c6; }"
+                "QPushButton:disabled { background-color: #f0f0f0; color: #999; }"
+            )
+            train_btn.setEnabled(_ML_AVAILABLE)
+            train_btn.clicked.connect(
+                lambda _checked=False, key=supplier_stats["supplier_key"], r=row_idx, t=table, stats=supplier_stats:
+                self._train_supplier(key, r, t, stats)
+            )
+            table.setCellWidget(row_idx, 5, train_btn)
+
             action_btn = QPushButton("הצג חריגים")
             action_btn.setStyleSheet(
                 "QPushButton { background-color: #e8e8e8; color: #333333; border: 1px solid #c0c0c0; border-radius: 4px; }"
@@ -851,7 +1049,7 @@ class SupplierReconciliationDashboard(QWidget):
             action_btn.clicked.connect(
                 lambda _checked=False, data=supplier_stats: self._show_supplier_details(data)
             )
-            table.setCellWidget(row_idx, 5, action_btn)
+            table.setCellWidget(row_idx, 6, action_btn)
 
         layout.addWidget(table)
 
@@ -882,6 +1080,81 @@ class SupplierReconciliationDashboard(QWidget):
         dialog = SupplierExceptionsDialog(supplier_stats, self)
         self._details_dialogs.append(dialog)
         dialog.exec()
+
+    def _ai_status_text(self, supplier_stats):
+        """טקסט לכפתור AI לכל ספק — מציג מצב מודל ומספר דגימות."""
+        if not _ML_AVAILABLE:
+            return "🧠 לא זמין"
+        supplier_key = supplier_stats.get("supplier_key", "")
+        try:
+            store = ml_engine.LabelStore()
+            n_samples = len(store.labels_for_supplier(supplier_key))
+        except Exception:
+            n_samples = 0
+        meta = supplier_stats.get("ai_meta")
+        if meta is None:
+            try:
+                meta = ml_engine.get_model_meta(supplier_key)
+            except Exception:
+                meta = None
+        if meta:
+            auc = meta.get("auc")
+            auc_str = f" AUC={auc:.2f}" if isinstance(auc, (int, float)) else ""
+            badge = "🟢" if n_samples >= ml_engine.MIN_SAMPLES_FOR_CONFIDENT_MODEL else "🟡"
+            return f"{badge} מודל פעיל ({n_samples}/{ml_engine.MIN_SAMPLES_FOR_CONFIDENT_MODEL}){auc_str}\n🧠 אמן מחדש"
+        if n_samples == 0:
+            return "🧠 אמן (אין תיוגים)"
+        return f"🟡 מודל בלמידה ({n_samples}/{ml_engine.MIN_SAMPLES_FOR_CONFIDENT_MODEL})\n🧠 אמן עכשיו"
+
+    def _train_supplier(self, supplier_key, row_idx, table, supplier_stats):
+        if not _ML_AVAILABLE:
+            QMessageBox.warning(self, "AI לא זמין",
+                                "חבילת xgboost לא מותקנת. הרץ:\npip install xgboost scikit-learn")
+            return
+        try:
+            store = ml_engine.LabelStore()
+            metrics = ml_engine.train_supplier_model(supplier_key, store)
+        except Exception as exc:
+            QMessageBox.critical(self, "שגיאת אימון", f"אימון נכשל:\n{exc}")
+            return
+
+        if not metrics.get("ok"):
+            QMessageBox.warning(
+                self,
+                "אימון לא בוצע",
+                f"{metrics.get('reason', 'שגיאה לא ידועה')}\n"
+                f"דגימות זמינות: {metrics.get('n_samples', 0)}",
+            )
+            return
+
+        # רענון טקסט הכפתור
+        supplier_stats["ai_meta"] = ml_engine.get_model_meta(supplier_key)
+        btn = table.cellWidget(row_idx, 5)
+        if isinstance(btn, QPushButton):
+            btn.setText(self._ai_status_text(supplier_stats))
+
+        # סיכום ההצלחה
+        auc = metrics.get("auc")
+        auc_str = f"AUC על holdout: {auc:.3f}\n" if isinstance(auc, (int, float)) else "AUC: לא חושב (מעט דגימות)\n"
+        importances = metrics.get("importances", {}) or {}
+        top_feats = sorted(importances.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        feats_str = "\n".join(f"  • {k}: {v:.3f}" for k, v in top_feats) or "  (אין)"
+
+        n_samples = metrics.get("n_samples", 0)
+        warn = ""
+        if n_samples < ml_engine.MIN_SAMPLES_FOR_CONFIDENT_MODEL:
+            warn = (
+                f"\n⚠️ מודל בלמידה ({n_samples}/{ml_engine.MIN_SAMPLES_FOR_CONFIDENT_MODEL} דגימות).\n"
+                "המשך לסמן זוגות לשיפור הדיוק."
+            )
+
+        QMessageBox.information(
+            self,
+            f"מודל {supplier_key} אומן בהצלחה",
+            f"סה\"כ דגימות: {n_samples}\n"
+            f"חיוביות: {metrics.get('n_positive', 0)} | שליליות: {metrics.get('n_negative', 0)}\n"
+            f"{auc_str}\nפיצ'רים מובילים:\n{feats_str}{warn}",
+        )
 
 
 def clean_card(card_val):
@@ -1136,6 +1409,12 @@ def load_credit_2000(file_path):
     df["מסוף_נקי"] = df["מסוף"].astype(str).str.strip().str.lower()
     df["מספר הזמנה_נקי"] = df["מספר הזמנה"].astype(str).str.strip()
 
+    # ─── סינון מסופים שאינם רלוונטים להשוואה ────────────────────────────────────
+    # מסוף cus2097 שייך לחברת ETS (חברה חיצונית) ואינו חלק ממערכת ההתאמה
+    # של אופיר טורס — יש לנטרלו לפניי קיבוץ והשוואה בפועל
+    EXCLUDED_TERMINALS = ["cus2097"]
+    df = df[~df["מסוף_נקי"].isin(EXCLUDED_TERMINALS)]
+
     def classify_supplier(row):
         terminal = row["מסוף_נקי"]
         order_no = row["מספר הזמנה_נקי"]
@@ -1153,7 +1432,7 @@ def load_credit_2000(file_path):
         gilboa_terminals = [
             "cus0853", "cus0856", "cus0862", "cus0865", "cus0866",
             "cus0870", "cus0871", "cus0874", "cus0879", "cus0881",
-            "cus0884", "cus2097", "cus2479", "cus3130", "cus3444"
+            "cus0884", "cus2479", "cus3130", "cus3444"
         ]
         if terminal in gilboa_terminals:
             return "גלבוע"
